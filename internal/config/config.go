@@ -19,6 +19,19 @@ type Config struct {
 	IncludePatterns []string `json:"include_patterns"`
 	ExcludePatterns []string `json:"exclude_patterns"`
 	
+	// Sorting options
+	SortByTime bool `json:"sort_by_time"`
+	Reverse    bool `json:"reverse"`
+	
+	// LLM options
+	EnableLLM     bool   `json:"enable_llm"`
+	LLMProvider   string `json:"llm_provider"`
+	LLMModel      string `json:"llm_model"`
+	LLMAPIKey     string `json:"llm_api_key"`
+	LLMBaseURL    string `json:"llm_base_url"`
+	LLMLanguage   string `json:"llm_language"`
+	LLMTimeout    time.Duration `json:"llm_timeout"`
+	
 	// Output options
 	SaveReport   bool   `json:"save_report"`
 	ReportFile   string `json:"report_file"`
@@ -35,6 +48,15 @@ func DefaultConfig() *Config {
 		OutputFormat:    reporter.FormatText,
 		IncludePatterns: []string{},
 		ExcludePatterns: []string{},
+		SortByTime:      false,
+		Reverse:         false,
+		EnableLLM:       false,
+		LLMProvider:     "openai",
+		LLMModel:        "gpt-4o-mini",
+		LLMAPIKey:       "",
+		LLMBaseURL:      "",
+		LLMLanguage:     "zh",
+		LLMTimeout:      10 * time.Second,
 		SaveReport:      false,
 		ReportFile:      "",
 		LogLevel:        "info",

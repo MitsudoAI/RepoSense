@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"reposense/internal/config"
+	"reposense/pkg/llm"
 	"reposense/pkg/reporter"
 	"reposense/pkg/scanner"
 	"reposense/pkg/updater"
@@ -59,6 +60,15 @@ func main() {
 		Run:   runStatus,
 	}
 	
+	// List command
+	var listCmd = &cobra.Command{
+		Use:   "list [directory]",
+		Short: "列出仓库及描述",
+		Long:  "列出指定目录下的所有Git仓库，并显示项目描述。支持按时间或字母排序",
+		Args:  cobra.MaximumNArgs(1),
+		Run:   runList,
+	}
+	
 	// Global flags
 	rootCmd.PersistentFlags().IntVarP(&cfg.WorkerCount, "workers", "w", cfg.WorkerCount, "并发工作协程数量 (1-50)")
 	rootCmd.PersistentFlags().DurationVarP(&cfg.Timeout, "timeout", "t", cfg.Timeout, "每个操作的超时时间")
@@ -70,8 +80,21 @@ func main() {
 	rootCmd.PersistentFlags().BoolVar(&cfg.SaveReport, "save-report", cfg.SaveReport, "保存报告到文件")
 	rootCmd.PersistentFlags().StringVar(&cfg.ReportFile, "report-file", cfg.ReportFile, "报告文件路径")
 	
+	// LLM flags
+	rootCmd.PersistentFlags().BoolVar(&cfg.EnableLLM, "enable-llm", cfg.EnableLLM, "启用LLM智能描述提取")
+	rootCmd.PersistentFlags().StringVar(&cfg.LLMProvider, "llm-provider", cfg.LLMProvider, "LLM提供商 (openai|openai-compatible|gemini|claude|ollama)")
+	rootCmd.PersistentFlags().StringVar(&cfg.LLMModel, "llm-model", cfg.LLMModel, "LLM模型名称")
+	rootCmd.PersistentFlags().StringVar(&cfg.LLMAPIKey, "llm-api-key", cfg.LLMAPIKey, "LLM API密钥")
+	rootCmd.PersistentFlags().StringVar(&cfg.LLMBaseURL, "llm-base-url", cfg.LLMBaseURL, "LLM API基础URL")
+	rootCmd.PersistentFlags().StringVar(&cfg.LLMLanguage, "llm-language", cfg.LLMLanguage, "描述语言 (zh|en|ja)")
+	rootCmd.PersistentFlags().DurationVar(&cfg.LLMTimeout, "llm-timeout", cfg.LLMTimeout, "LLM请求超时时间")
+	
+	// List command specific flags
+	listCmd.Flags().BoolVar(&cfg.SortByTime, "sort-by-time", cfg.SortByTime, "按更新时间排序")
+	listCmd.Flags().BoolVarP(&cfg.Reverse, "reverse", "r", cfg.Reverse, "倒序显示")
+	
 	// Add commands
-	rootCmd.AddCommand(updateCmd, scanCmd, statusCmd)
+	rootCmd.AddCommand(updateCmd, scanCmd, statusCmd, listCmd)
 	
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
@@ -253,6 +276,99 @@ func runStatus(cmd *cobra.Command, args []string) {
 		}
 		
 		if err := reporterInstance.SaveReport(filename, statuses); err != nil {
+			fmt.Fprintf(os.Stderr, "保存报告失败: %v\n", err)
+		} else {
+			fmt.Printf("📄 报告已保存到: %s\n", filename)
+		}
+	}
+}
+
+func runList(cmd *cobra.Command, args []string) {
+	directory := getCurrentDirectory(args)
+	
+	if err := cfg.Validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "配置错误: %v\n", err)
+		os.Exit(1)
+	}
+	
+	// 检查是否从环境变量读取API密钥
+	if cfg.LLMAPIKey == "" && cfg.EnableLLM {
+		if key := os.Getenv("OPENAI_API_KEY"); key != "" && cfg.LLMProvider == "openai" {
+			cfg.LLMAPIKey = key
+		} else if key := os.Getenv("GEMINI_API_KEY"); key != "" && cfg.LLMProvider == "gemini" {
+			cfg.LLMAPIKey = key
+		} else if key := os.Getenv("CLAUDE_API_KEY"); key != "" && cfg.LLMProvider == "claude" {
+			cfg.LLMAPIKey = key
+		} else if key := os.Getenv("LLM_API_KEY"); key != "" {
+			cfg.LLMAPIKey = key
+		}
+	}
+	
+	// 初始化LLM描述服务
+	var descriptionService *llm.DescriptionService
+	if cfg.EnableLLM {
+		provider := llm.Provider(cfg.LLMProvider)
+		if err := llm.ValidateConfiguration(provider, cfg.LLMAPIKey, cfg.LLMBaseURL); err != nil {
+			fmt.Fprintf(os.Stderr, "LLM配置错误: %v\n", err)
+			fmt.Println("提示: 使用 --llm-api-key 设置API密钥，或设置环境变量")
+			os.Exit(1)
+		}
+		
+		descriptionService = llm.NewDescriptionService(
+			provider,
+			cfg.LLMModel,
+			cfg.LLMAPIKey,
+			cfg.LLMBaseURL,
+			cfg.LLMLanguage,
+			cfg.LLMTimeout,
+			true,
+		)
+		
+		fmt.Printf("🤖 已启用LLM智能描述 (提供商: %s, 模型: %s, 语言: %s)\n", 
+			cfg.LLMProvider, cfg.LLMModel, cfg.LLMLanguage)
+	}
+	
+	// 初始化组件
+	var scannerInstance *scanner.Scanner
+	if descriptionService != nil {
+		scannerInstance = scanner.NewScannerWithLLM(descriptionService)
+	} else {
+		scannerInstance = scanner.NewScanner()
+	}
+	
+	reporterInstance := reporter.NewReporter(cfg.OutputFormat, cfg.Verbose)
+	
+	if cfg.Verbose {
+		scannerInstance.SetLogLevel(logrus.DebugLevel)
+	}
+	
+	fmt.Printf("🔍 正在扫描目录: %s\n", directory)
+	
+	// 扫描仓库并获取描述
+	repositories, err := scannerInstance.ScanDirectoryWithDescription(directory, cfg.IncludePatterns, cfg.ExcludePatterns)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "扫描失败: %v\n", err)
+		os.Exit(1)
+	}
+	
+	if len(repositories) == 0 {
+		fmt.Println("未发现任何Git仓库")
+		return
+	}
+	
+	fmt.Printf("📦 发现 %d 个Git仓库\n", len(repositories))
+	
+	// 显示结果
+	reporterInstance.ReportListResults(repositories, cfg.SortByTime, cfg.Reverse)
+	
+	// 保存报告
+	if cfg.SaveReport {
+		filename := cfg.ReportFile
+		if filename == "" {
+			filename = fmt.Sprintf("reposense-list-%s.json", time.Now().Format("20060102-150405"))
+		}
+		
+		if err := reporterInstance.SaveReport(filename, repositories); err != nil {
 			fmt.Fprintf(os.Stderr, "保存报告失败: %v\n", err)
 		} else {
 			fmt.Printf("📄 报告已保存到: %s\n", filename)

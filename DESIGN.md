@@ -45,8 +45,22 @@
    - 高亮显示错误和警告
    - 支持结果导出
 
+5. **仓库列表**
+   - 列出所有仓库及其描述信息
+   - 自动从README文件提取项目描述
+   - 支持LLM智能描述生成
+   - 支持按时间或字母排序
+   - 支持正序/倒序显示
+   - 多语言描述支持（中文/英文/日文）
+
 #### 2.1.2 扩展功能
-1. **配置管理**
+1. **LLM集成**
+   - 支持多种LLM API（OpenAI、Gemini、Claude、Ollama等）
+   - 智能项目描述生成
+   - 多语言支持（中文、英文、日文）
+   - 可配置的模型和参数
+
+2. **配置管理**
    - 支持配置文件
    - 自定义并发数
    - 设置超时时间
@@ -169,10 +183,12 @@ const (
 ### 4.1 技术栈
 - 编程语言：Go 1.21+
 - 并发模型：Goroutines + Channel
-- CLI框架：cobra/urfave/cli
+- CLI框架：cobra
+- HTTP客户端：resty
 - 进度显示：progressbar
-- 配置管理：viper
-- 日志框架：logrus/zap
+- 配置管理：内置配置
+- 日志框架：logrus
+- LLM集成：自定义客户端库
 
 ### 4.2 并发策略
 1. **Worker Pool模式**
@@ -201,21 +217,54 @@ type GitOperator interface {
 ### 5.1 命令行接口
 ```bash
 # 基本用法
-reposense update [options] <directory>
+reposense <command> [options] <directory>
 
-# 选项
-Options:
-  -c, --concurrency int    并发数量 (default 10)
-  -t, --timeout duration   单个仓库超时时间 (default 30s)
-  -f, --filter string      仓库名称过滤模式
-  -o, --output string      输出报告文件路径
-  --format string          报告格式 (json|csv|text)
+# 支持的命令
+Commands:
+  scan              扫描Git仓库
+  update            批量更新仓库
+  status            查看仓库状态
+  list              列出仓库及描述
+
+# 全局选项
+Global Options:
+  -w, --workers int        并发数量 (default 10)
+  -t, --timeout duration   超时时间 (default 30s)
+  -i, --include string     包含模式 (可多次指定)
+  -e, --exclude string     排除模式 (可多次指定)
+  -f, --format string      输出格式 (text|table|json)
   -v, --verbose           详细输出模式
+  --save-report           保存报告到文件
+  --report-file string    报告文件路径
   -h, --help              显示帮助信息
 
+# list命令特定选项
+List Options:
+  --sort-by-time          按更新时间排序
+  -r, --reverse           倒序显示
+
+# LLM选项
+LLM Options:
+  --enable-llm            启用LLM智能描述提取
+  --llm-provider string   LLM提供商 (openai|openai-compatible|gemini|claude|ollama)
+  --llm-model string      LLM模型名称
+  --llm-api-key string    LLM API密钥
+  --llm-base-url string   LLM API基础URL
+  --llm-language string   描述语言 (zh|en|ja)
+  --llm-timeout duration  LLM请求超时时间
+
 # 示例
-reposense update -c 20 ~/repo/ai-space
-reposense update -f "llm-*" -o report.json ~/repo
+reposense scan ~/repo/ai-space
+reposense update -w 20 ~/repo/ai-space
+reposense status --format table ~/repo
+reposense list --sort-by-time -r ~/repo/ai-space
+reposense list --format json --save-report ~/repo
+
+# LLM智能描述示例
+export OPENAI_API_KEY=your_api_key
+reposense list --enable-llm --llm-language zh ~/repo/ai-space
+reposense list --enable-llm --llm-provider gemini --llm-api-key your_key ~/repo
+reposense list --enable-llm --llm-provider ollama --llm-model llama3 ~/repo
 ```
 
 ### 5.2 输出示例
@@ -249,14 +298,21 @@ Day 1（2-3小时）：核心功能完成 ✅
 - 基本的Worker Pool
 - 简单的命令行界面
 
-Day 2（1-2小时）：优化和美化 🎨
+Day 2（1-2小时）：优化和美化 ✅
 
 - 添加进度条
 - 彩色输出
 - 错误处理完善
 - 生成报告功能
 
-Day 3（1小时）：测试和调优 🔧
+Day 3（1小时）：增强功能 ✅
+
+- 仓库列表功能实现
+- 项目描述自动提取
+- 按时间/字母排序支持
+- 完整CLI命令集
+
+Day 4（1小时）：测试和调优 🔧
 
 - 在你的250个仓库上实测
 - 调整并发参数

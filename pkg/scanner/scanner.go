@@ -1,9 +1,13 @@
 package scanner
 
 import (
+	"bufio"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"reposense/pkg/llm"
 
 	"github.com/sirupsen/logrus"
 )
@@ -16,9 +20,17 @@ type Repository struct {
 	Error       string `json:"error,omitempty"`
 }
 
+// RepositoryWithDescription represents a Git repository with description and last commit date
+type RepositoryWithDescription struct {
+	Repository
+	Description    string    `json:"description"`
+	LastCommitDate time.Time `json:"last_commit_date"`
+}
+
 // Scanner handles repository discovery
 type Scanner struct {
-	logger *logrus.Logger
+	logger            *logrus.Logger
+	descriptionService *llm.DescriptionService
 }
 
 // NewScanner creates a new Scanner instance
@@ -30,9 +42,22 @@ func NewScanner() *Scanner {
 	}
 }
 
+// NewScannerWithLLM creates a new Scanner instance with LLM description service
+func NewScannerWithLLM(descriptionService *llm.DescriptionService) *Scanner {
+	logger := logrus.New()
+	logger.SetLevel(logrus.InfoLevel)
+	return &Scanner{
+		logger:            logger,
+		descriptionService: descriptionService,
+	}
+}
+
 // SetLogLevel sets the logging level
 func (s *Scanner) SetLogLevel(level logrus.Level) {
 	s.logger.SetLevel(level)
+	if s.descriptionService != nil {
+		s.descriptionService.SetLogLevel(level)
+	}
 }
 
 // ScanDirectory scans a directory for Git repositories
@@ -154,4 +179,104 @@ func (s *Scanner) GetRepositoryCount(rootPath string) (int, error) {
 		return 0, err
 	}
 	return len(repositories), nil
+}
+
+// extractDescription extracts project description from README files
+func (s *Scanner) extractDescription(repoPath string) string {
+	// Use LLM service if available
+	if s.descriptionService != nil {
+		return s.descriptionService.ExtractDescription(repoPath)
+	}
+	
+	// Fallback to simple extraction
+	readmeFiles := []string{
+		"README.md",
+		"README.rst",
+		"README.txt",
+		"README",
+		"readme.md",
+		"readme.rst",
+		"readme.txt",
+		"readme",
+	}
+	
+	for _, filename := range readmeFiles {
+		readmePath := filepath.Join(repoPath, filename)
+		if description := s.readFirstNonEmptyLine(readmePath); description != "" {
+			return description
+		}
+	}
+	
+	return "暂无描述"
+}
+
+// readFirstNonEmptyLine reads the first non-empty line from a file
+func (s *Scanner) readFirstNonEmptyLine(filePath string) string {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		
+		// 跳过markdown标题标记和其他格式符号
+		line = strings.TrimPrefix(line, "#")
+		line = strings.TrimPrefix(line, "=")
+		line = strings.TrimPrefix(line, "-")
+		line = strings.TrimPrefix(line, "*")
+		line = strings.TrimSpace(line)
+		
+		if line != "" && len(line) > 1 {
+			// 限制描述长度
+			if len(line) > 100 {
+				line = line[:97] + "..."
+			}
+			return line
+		}
+	}
+	
+	return ""
+}
+
+// ScanDirectoryWithDescription scans directory and extracts descriptions
+func (s *Scanner) ScanDirectoryWithDescription(rootPath string, includePatterns, excludePatterns []string) ([]RepositoryWithDescription, error) {
+	repositories, err := s.ScanDirectoryWithFilter(rootPath, includePatterns, excludePatterns)
+	if err != nil {
+		return nil, err
+	}
+	
+	var reposWithDesc []RepositoryWithDescription
+	for _, repo := range repositories {
+		repoWithDesc := RepositoryWithDescription{
+			Repository:  repo,
+			Description: s.extractDescription(repo.Path),
+		}
+		
+		// 获取最后提交时间（用于排序）
+		if lastCommitDate := s.getLastCommitDate(repo.Path); !lastCommitDate.IsZero() {
+			repoWithDesc.LastCommitDate = lastCommitDate
+		}
+		
+		reposWithDesc = append(reposWithDesc, repoWithDesc)
+		s.logger.Debugf("收集描述完成: %s - %s", repo.Name, repoWithDesc.Description)
+	}
+	
+	return reposWithDesc, nil
+}
+
+// getLastCommitDate gets the last commit date for sorting
+func (s *Scanner) getLastCommitDate(repoPath string) time.Time {
+	// 这里实现一个简单的git log命令来获取最后提交时间
+	// 为了避免依赖复杂的git操作，我们使用.git目录的修改时间作为近似值
+	gitPath := filepath.Join(repoPath, ".git")
+	if info, err := os.Stat(gitPath); err == nil {
+		return info.ModTime()
+	}
+	return time.Time{}
 }

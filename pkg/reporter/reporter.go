@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -116,6 +117,38 @@ func (r *Reporter) ReportStatusResults(statuses []scanner.RepositoryStatus) {
 		r.reportStatusResultsTable(statuses)
 	default:
 		r.reportStatusResultsText(statuses)
+	}
+}
+
+// ReportListResults reports repository list results with descriptions
+func (r *Reporter) ReportListResults(repositories []scanner.RepositoryWithDescription, sortByTime, reverse bool) {
+	// 排序
+	sortedRepos := make([]scanner.RepositoryWithDescription, len(repositories))
+	copy(sortedRepos, repositories)
+	
+	if sortByTime {
+		sort.Slice(sortedRepos, func(i, j int) bool {
+			if reverse {
+				return sortedRepos[i].LastCommitDate.After(sortedRepos[j].LastCommitDate)
+			}
+			return sortedRepos[i].LastCommitDate.Before(sortedRepos[j].LastCommitDate)
+		})
+	} else {
+		sort.Slice(sortedRepos, func(i, j int) bool {
+			if reverse {
+				return sortedRepos[i].Name > sortedRepos[j].Name
+			}
+			return sortedRepos[i].Name < sortedRepos[j].Name
+		})
+	}
+	
+	switch r.format {
+	case FormatJSON:
+		r.reportListResultsJSON(sortedRepos)
+	case FormatTable:
+		r.reportListResultsTable(sortedRepos)
+	default:
+		r.reportListResultsText(sortedRepos)
 	}
 }
 
@@ -402,6 +435,58 @@ func formatDuration(d time.Duration) string {
 	}
 	
 	return fmt.Sprintf("%dh%dm%.1fs", hours, remainingMinutes, remainingSeconds)
+}
+
+// reportListResultsText reports list results in text format
+func (r *Reporter) reportListResultsText(repositories []scanner.RepositoryWithDescription) {
+	fmt.Printf("仓库列表 (%d个仓库):\n", len(repositories))
+	fmt.Println(strings.Repeat("-", 80))
+	
+	for _, repo := range repositories {
+		fmt.Printf("%s: %s\n", repo.Name, repo.Description)
+		if r.verbose && !repo.LastCommitDate.IsZero() {
+			fmt.Printf("   最后更新: %s\n", repo.LastCommitDate.Format("2006-01-02 15:04"))
+		}
+	}
+	fmt.Println()
+}
+
+// reportListResultsTable reports list results in table format
+func (r *Reporter) reportListResultsTable(repositories []scanner.RepositoryWithDescription) {
+	fmt.Printf("%-30s %-50s %-20s\n", "仓库名称", "描述", "最后更新")
+	fmt.Println(strings.Repeat("-", 105))
+	
+	for _, repo := range repositories {
+		name := repo.Name
+		if len(name) > 28 {
+			name = name[:25] + "..."
+		}
+		
+		description := repo.Description
+		if len(description) > 48 {
+			description = description[:45] + "..."
+		}
+		
+		lastUpdate := ""
+		if !repo.LastCommitDate.IsZero() {
+			lastUpdate = repo.LastCommitDate.Format("2006-01-02 15:04")
+		}
+		
+		fmt.Printf("%-30s %-50s %-20s\n", name, description, lastUpdate)
+	}
+	fmt.Println()
+}
+
+// reportListResultsJSON reports list results in JSON format
+func (r *Reporter) reportListResultsJSON(repositories []scanner.RepositoryWithDescription) {
+	output := map[string]interface{}{
+		"list_results": repositories,
+		"total":        len(repositories),
+		"timestamp":    time.Now(),
+	}
+	
+	jsonData, _ := json.MarshalIndent(output, "", "  ")
+	fmt.Println(string(jsonData))
 }
 
 // SaveReport saves report to file

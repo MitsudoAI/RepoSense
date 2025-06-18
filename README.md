@@ -10,6 +10,10 @@ RepoSense 是一个高效的 Git 仓库批量管理工具，专为需要管理�
 - 🔍 **智能扫描**: 自动发现指定目录下的所有 Git 仓库
 - 🚀 **并行更新**: 使用工作池模式并行执行批量 `git pull` 操作
 - 📊 **状态收集**: 获取仓库详细状态信息（分支、提交、工作区状态等）
+- 📋 **仓库列表**: 列出仓库及其描述，自动从README提取项目描述
+- 🤖 **LLM智能描述**: 支持OpenAI、Gemini、Claude、Ollama等LLM API智能生成项目描述
+- 🌍 **多语言支持**: 支持中文、英文、日文的项目描述生成
+- 🔤 **智能排序**: 支持按时间或字母排序，可正序/倒序显示
 - 📈 **进度显示**: 实时显示更新进度和统计信息
 - 🎯 **智能过滤**: 支持包含/排除模式过滤仓库
 - 📄 **多种输出**: 支持文本、表格、JSON 三种输出格式
@@ -45,6 +49,12 @@ reposense scan
 # 扫描指定目录
 reposense scan /path/to/repositories
 
+# 列出仓库及其描述（按字母排序）
+reposense list
+
+# 按更新时间倒序列出仓库
+reposense list --sort-by-time --reverse
+
 # 批量更新当前目录下的所有 Git 仓库
 reposense update
 
@@ -52,7 +62,7 @@ reposense update
 reposense status
 
 # 使用表格格式显示
-reposense scan --format table
+reposense list --format table
 
 # 使用 JSON 格式输出
 reposense update --format json
@@ -67,11 +77,24 @@ reposense update --workers 20
 # 设置超时时间为 60 秒
 reposense update --timeout 60s
 
-# 只更新包含 "golang" 的仓库
-reposense update --include golang
+# 只显示包含 "golang" 的仓库
+reposense list --include golang
 
-# 排除包含 "test" 的仓库
-reposense update --exclude test
+# 排除包含 "test" 的仓库列表
+reposense list --exclude test --sort-by-time
+
+# 按时间排序并保存为表格格式
+reposense list --sort-by-time --format table --save-report
+
+# 使用LLM智能生成中文描述
+export OPENAI_API_KEY=your_api_key  
+reposense list --enable-llm --llm-language zh
+
+# 使用Gemini生成英文描述
+reposense list --enable-llm --llm-provider gemini --llm-api-key your_key --llm-language en
+
+# 使用本地Ollama模型
+reposense list --enable-llm --llm-provider ollama --llm-model llama3 --llm-base-url http://localhost:11434
 
 # 模拟运行，不执行实际操作
 reposense update --dry-run
@@ -79,8 +102,8 @@ reposense update --dry-run
 # 保存报告到文件
 reposense update --save-report --report-file update-report.json
 
-# 显示详细输出
-reposense update --verbose
+# 显示详细输出（包含更新时间）
+reposense list --verbose --sort-by-time
 ```
 
 ## 📋 命令参考
@@ -98,6 +121,25 @@ reposense update --verbose
 | `--exclude` | `-e` | | 排除模式 (可多次指定) |
 | `--save-report` | | false | 保存报告到文件 |
 | `--report-file` | | | 报告文件路径 |
+
+### LLM选项
+
+| 选项 | 默认值 | 描述 |
+|------|--------|------|
+| `--enable-llm` | false | 启用LLM智能描述提取 |
+| `--llm-provider` | openai | LLM提供商 (openai/openai-compatible/gemini/claude/ollama) |
+| `--llm-model` | gpt-4o-mini | LLM模型名称 |
+| `--llm-api-key` | | LLM API密钥 (可通过环境变量设置) |
+| `--llm-base-url` | | LLM API基础URL |
+| `--llm-language` | zh | 描述语言 (zh/en/ja) |
+| `--llm-timeout` | 10s | LLM请求超时时间 |
+
+#### 环境变量支持
+
+- `OPENAI_API_KEY`: OpenAI API密钥
+- `GEMINI_API_KEY`: Gemini API密钥  
+- `CLAUDE_API_KEY`: Claude API密钥
+- `LLM_API_KEY`: 通用LLM API密钥
 
 ### 子命令
 
@@ -120,6 +162,14 @@ reposense update /home/user/projects --workers 15 --timeout 45s
 
 ```bash
 reposense status /home/user/projects --format json
+```
+
+#### `list [directory]`
+列出指定目录下的所有 Git 仓库及其描述信息。
+
+```bash
+reposense list /home/user/projects --sort-by-time --reverse
+reposense list --format table --include golang
 ```
 
 ## 🏗️ 架构设计
