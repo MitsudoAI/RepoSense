@@ -17,8 +17,10 @@ import (
 )
 
 var (
-	cfg       *config.Config
-	disableLLM bool
+	cfg                 *config.Config
+	disableLLM          bool
+	gitPullStrategy     string
+	gitAllowInteractive bool
 )
 
 func main() {
@@ -119,6 +121,10 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&cfg.LLMLanguage, "llm-language", cfg.LLMLanguage, "描述语言 (zh|en|ja)")
 	rootCmd.PersistentFlags().DurationVar(&cfg.LLMTimeout, "llm-timeout", cfg.LLMTimeout, "LLM请求超时时间")
 	
+	// Git operation flags
+	rootCmd.PersistentFlags().StringVar(&gitPullStrategy, "git-pull-strategy", "ff-only", "Git拉取策略 (ff-only|merge|rebase)")
+	rootCmd.PersistentFlags().BoolVar(&gitAllowInteractive, "git-allow-interactive", false, "允许Git交互操作 (可能导致挂起)")
+	
 	// List command specific flags
 	listCmd.Flags().BoolVar(&cfg.SortByTime, "sort-by-time", cfg.SortByTime, "按更新时间排序")
 	listCmd.Flags().BoolVarP(&cfg.Reverse, "reverse", "r", cfg.Reverse, "倒序显示")
@@ -169,9 +175,11 @@ func runUpdate(cmd *cobra.Command, args []string) {
 	
 	// 配置更新器
 	updaterConfig := updater.UpdaterConfig{
-		WorkerCount: cfg.WorkerCount,
-		Timeout:     cfg.Timeout,
-		DryRun:      cfg.DryRun,
+		WorkerCount:       cfg.WorkerCount,
+		Timeout:           cfg.Timeout,
+		DryRun:            cfg.DryRun,
+		GitPullStrategy:   gitPullStrategy,
+		GitNonInteractive: !gitAllowInteractive, // 反转：不允许交互 = 启用非交互模式
 	}
 	
 	updaterInstance := updater.NewUpdater(updaterConfig)
@@ -477,6 +485,11 @@ func init() {
 		// 处理 disable-llm 标志
 		if disableLLM {
 			cfg.EnableLLM = false
+		}
+		
+		// 设置git策略默认值
+		if gitPullStrategy == "" {
+			gitPullStrategy = "ff-only"
 		}
 		
 		// 验证输出格式

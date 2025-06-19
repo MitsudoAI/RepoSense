@@ -3,6 +3,7 @@ package scanner
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -239,9 +240,17 @@ func (sc *StatusCollector) getRemoteURL(ctx context.Context, repoPath string) (s
 
 // getRemoteDiff gets the difference with remote branch
 func (sc *StatusCollector) getRemoteDiff(ctx context.Context, repoPath string) (int, int, error) {
-	// 首先尝试获取远程信息（不拉取）
-	cmd := exec.CommandContext(ctx, "git", "remote", "show", "origin")
+	// 使用更安全的命令检查远程连接（非交互模式）
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--exit-code", "origin", "HEAD")
 	cmd.Dir = repoPath
+	
+	// 设置环境变量防止交互提示
+	cmd.Env = append(os.Environ(),
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_ASKPASS=echo",
+		"SSH_ASKPASS=echo",
+		"GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no",
+	)
 	
 	if _, err := cmd.Output(); err != nil {
 		// 如果无法连接远程，返回0

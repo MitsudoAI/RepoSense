@@ -3,7 +3,9 @@ package updater
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,9 +27,11 @@ type UpdateResult struct {
 
 // UpdaterConfig holds configuration for the updater
 type UpdaterConfig struct {
-	WorkerCount int           `json:"worker_count"`
-	Timeout     time.Duration `json:"timeout"`
-	DryRun      bool          `json:"dry_run"`
+	WorkerCount       int           `json:"worker_count"`
+	Timeout           time.Duration `json:"timeout"`
+	DryRun            bool          `json:"dry_run"`
+	GitPullStrategy   string        `json:"git_pull_strategy"`   // "ff-only", "merge", "rebase"
+	GitNonInteractive bool          `json:"git_non_interactive"` // 禁用交互提示
 }
 
 // Updater handles batch Git operations
@@ -140,16 +144,60 @@ func (u *Updater) updateRepository(repo scanner.Repository) UpdateResult {
 		ctx, cancel := context.WithTimeout(u.ctx, u.config.Timeout)
 		defer cancel()
 		
+		// 构建git pull命令参数
+		args := []string{"pull"}
+		
+		// 根据策略添加参数
+		switch u.config.GitPullStrategy {
+		case "rebase":
+			args = append(args, "--rebase", "--no-edit")
+		case "merge":
+			args = append(args, "--no-edit")
+		default: // "ff-only" 或未设置
+			args = append(args, "--no-edit", "--ff-only")
+		}
+		
 		// 执行 git pull
-		cmd := exec.CommandContext(ctx, "git", "pull")
+		cmd := exec.CommandContext(ctx, "git", args...)
 		cmd.Dir = repo.Path
+		
+		// 如果启用非交互模式，设置环境变量防止交互提示
+		if u.config.GitNonInteractive {
+			cmd.Env = append(os.Environ(),
+				"GIT_TERMINAL_PROMPT=0",                           // 禁用终端提示
+				"GIT_ASKPASS=echo",                               // 禁用密码提示
+				"SSH_ASKPASS=echo",                               // 禁用SSH密码提示
+				"GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no", // 非交互SSH
+			)
+		}
 		
 		output, err := cmd.CombinedOutput()
 		
 		if err != nil {
 			result.Success = false
 			result.Error = err.Error()
-			result.Message = fmt.Sprintf("更新失败: %s", string(output))
+			
+			// 提供更友好的错误消息
+			errorMsg := string(output)
+			if strings.Contains(errorMsg, "Permission denied") || strings.Contains(errorMsg, "could not read from remote repository") {
+				result.Message = "更新失败: SSH认证失败或无权限访问远程仓库"
+			} else if strings.Contains(errorMsg, "refusing to merge unrelated histories") {
+				result.Message = "更新失败: 拒绝合并不相关的历史记录"
+			} else if strings.Contains(errorMsg, "non-fast-forward") {
+				result.Message = "更新失败: 非快进更新，本地有未推送的提交"
+			} else if strings.Contains(errorMsg, "Authentication failed") {
+				result.Message = "更新失败: 认证失败，请检查访问凭据"
+			} else if strings.Contains(errorMsg, "There is no tracking information") {
+				result.Message = "更新失败: 当前分支没有设置远程跟踪分支"
+			} else if strings.Contains(errorMsg, "timeout") || strings.Contains(errorMsg, "Timeout") {
+				result.Message = "更新失败: 连接超时，请检查网络或远程仓库状态"
+			} else {
+				// 截断长错误消息
+				if len(errorMsg) > 100 {
+					errorMsg = errorMsg[:97] + "..."
+				}
+				result.Message = fmt.Sprintf("更新失败: %s", errorMsg)
+			}
 		} else {
 			result.Success = true
 			result.Message = u.parseGitPullOutput(string(output))
