@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"reposense/internal/config"
+	"reposense/pkg/cache"
 	"reposense/pkg/llm"
 	"reposense/pkg/reporter"
 	"reposense/pkg/scanner"
@@ -21,6 +22,8 @@ var (
 	disableLLM          bool
 	gitPullStrategy     string
 	gitAllowInteractive bool
+	enableCache         bool
+	forceRefresh        bool
 )
 
 func main() {
@@ -100,6 +103,42 @@ func main() {
 		Run:   runConfigPath,
 	}
 	
+	// Cache command
+	var cacheCmd = &cobra.Command{
+		Use:   "cache",
+		Short: "缓存管理",
+		Long:  "管理LLM描述缓存",
+	}
+	
+	var cacheStatsCmd = &cobra.Command{
+		Use:   "stats",
+		Short: "显示缓存统计",
+		Long:  "显示缓存使用统计信息",
+		Run:   runCacheStats,
+	}
+	
+	var cacheClearCmd = &cobra.Command{
+		Use:   "clear",
+		Short: "清空缓存",
+		Long:  "清空所有缓存数据",
+		Run:   runCacheClear,
+	}
+	
+	var cacheRefreshCmd = &cobra.Command{
+		Use:   "refresh [repository]",
+		Short: "刷新缓存",
+		Long:  "刷新指定仓库的缓存，如果不指定仓库则刷新所有缓存",
+		Args:  cobra.MaximumNArgs(1),
+		Run:   runCacheRefresh,
+	}
+	
+	var cachePathCmd = &cobra.Command{
+		Use:   "path",
+		Short: "显示缓存路径",
+		Long:  "显示缓存数据库文件路径",
+		Run:   runCachePath,
+	}
+	
 	// Global flags
 	rootCmd.PersistentFlags().IntVarP(&cfg.WorkerCount, "workers", "w", cfg.WorkerCount, "并发工作协程数量 (1-50)")
 	rootCmd.PersistentFlags().DurationVarP(&cfg.Timeout, "timeout", "t", cfg.Timeout, "每个操作的超时时间")
@@ -125,6 +164,10 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&gitPullStrategy, "git-pull-strategy", "ff-only", "Git拉取策略 (ff-only|merge|rebase)")
 	rootCmd.PersistentFlags().BoolVar(&gitAllowInteractive, "git-allow-interactive", false, "允许Git交互操作 (可能导致挂起)")
 	
+	// Cache flags
+	rootCmd.PersistentFlags().BoolVar(&enableCache, "enable-cache", true, "启用LLM结果缓存 (默认启用)")
+	rootCmd.PersistentFlags().BoolVar(&forceRefresh, "force-refresh", false, "强制刷新缓存，重新生成所有描述")
+	
 	// List command specific flags
 	listCmd.Flags().BoolVar(&cfg.SortByTime, "sort-by-time", cfg.SortByTime, "按更新时间排序")
 	listCmd.Flags().BoolVarP(&cfg.Reverse, "reverse", "r", cfg.Reverse, "倒序显示")
@@ -132,8 +175,11 @@ func main() {
 	// Add sub-commands to config
 	configCmd.AddCommand(configShowCmd, configSetCmd, configPathCmd)
 	
+	// Add sub-commands to cache
+	cacheCmd.AddCommand(cacheStatsCmd, cacheClearCmd, cacheRefreshCmd, cachePathCmd)
+	
 	// Add commands
-	rootCmd.AddCommand(updateCmd, scanCmd, statusCmd, listCmd, configCmd)
+	rootCmd.AddCommand(updateCmd, scanCmd, statusCmd, listCmd, configCmd, cacheCmd)
 	
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
@@ -345,48 +391,66 @@ func runList(cmd *cobra.Command, args []string) {
 		}
 	}
 	
-	// 初始化LLM描述服务
-	var descriptionService *llm.DescriptionService
+	// 初始化缓存管理器
+	cacheManager, err := cache.NewManager(
+		cfg.EnableLLM,
+		cfg.LLMProvider,
+		cfg.LLMModel,
+		cfg.LLMAPIKey,
+		cfg.LLMBaseURL,
+		cfg.LLMLanguage,
+		cfg.LLMTimeout,
+		enableCache,
+		forceRefresh,
+	)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "初始化缓存失败: %v\n", err)
+		os.Exit(1)
+	}
+	defer cacheManager.Close()
+	
+	// 初始化缓存扫描器
+	cachedScanner := scanner.NewCachedScanner(cacheManager)
+	reporterInstance := reporter.NewReporter(cfg.OutputFormat, cfg.Verbose)
+	
+	if cfg.Verbose {
+		cachedScanner.SetLogLevel(logrus.DebugLevel)
+	}
+	
+	// 显示状态信息
 	if cfg.EnableLLM {
-		provider := llm.Provider(cfg.LLMProvider)
-		if err := llm.ValidateConfiguration(provider, cfg.LLMAPIKey, cfg.LLMBaseURL); err != nil {
+		if err := llm.ValidateConfiguration(llm.Provider(cfg.LLMProvider), cfg.LLMAPIKey, cfg.LLMBaseURL); err != nil {
 			fmt.Fprintf(os.Stderr, "LLM配置错误: %v\n", err)
 			fmt.Println("提示: 使用 --llm-api-key 设置API密钥，或设置环境变量")
 			os.Exit(1)
 		}
 		
-		descriptionService = llm.NewDescriptionService(
-			provider,
-			cfg.LLMModel,
-			cfg.LLMAPIKey,
-			cfg.LLMBaseURL,
-			cfg.LLMLanguage,
-			cfg.LLMTimeout,
-			true,
-		)
+		cacheStatus := ""
+		if enableCache {
+			if forceRefresh {
+				cacheStatus = ", 强制刷新缓存"
+			} else {
+				cacheStatus = ", 启用缓存"
+			}
+		} else {
+			cacheStatus = ", 禁用缓存"
+		}
 		
-		fmt.Printf("🤖 已启用LLM智能描述 (提供商: %s, 模型: %s, 语言: %s)\n", 
-			cfg.LLMProvider, cfg.LLMModel, cfg.LLMLanguage)
-	}
-	
-	// 初始化组件
-	var scannerInstance *scanner.Scanner
-	if descriptionService != nil {
-		scannerInstance = scanner.NewScannerWithLLM(descriptionService)
-	} else {
-		scannerInstance = scanner.NewScanner()
-	}
-	
-	reporterInstance := reporter.NewReporter(cfg.OutputFormat, cfg.Verbose)
-	
-	if cfg.Verbose {
-		scannerInstance.SetLogLevel(logrus.DebugLevel)
+		fmt.Printf("🤖 已启用LLM智能描述 (提供商: %s, 模型: %s, 语言: %s%s)\n", 
+			cfg.LLMProvider, cfg.LLMModel, cfg.LLMLanguage, cacheStatus)
 	}
 	
 	fmt.Printf("🔍 正在扫描目录: %s\n", directory)
 	
-	// 扫描仓库并获取描述
-	repositories, err := scannerInstance.ScanDirectoryWithDescription(directory, cfg.IncludePatterns, cfg.ExcludePatterns)
+	// 扫描仓库并获取描述（使用缓存）
+	repositories, err := cachedScanner.ScanDirectoryWithDescription(
+		directory, 
+		cfg.IncludePatterns, 
+		cfg.ExcludePatterns,
+		cfg.LLMProvider,
+		cfg.LLMModel,
+		cfg.LLMLanguage,
+	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "扫描失败: %v\n", err)
 		os.Exit(1)
@@ -398,6 +462,14 @@ func runList(cmd *cobra.Command, args []string) {
 	}
 	
 	fmt.Printf("📦 发现 %d 个Git仓库\n", len(repositories))
+	
+	// 显示缓存统计（如果启用）
+	if enableCache && cfg.Verbose {
+		if stats, err := cacheManager.GetCacheStats(); err == nil {
+			fmt.Printf("💾 缓存统计: 命中 %d 次, 未命中 %d 次, API调用 %d 次\n", 
+				stats.CacheHits, stats.CacheMisses, stats.LLMAPICalls)
+		}
+	}
 	
 	// 显示结果
 	reporterInstance.ReportListResults(repositories, cfg.SortByTime, cfg.Reverse)
@@ -463,6 +535,94 @@ func runConfigSet(cmd *cobra.Command, args []string) {
 
 func runConfigPath(cmd *cobra.Command, args []string) {
 	fmt.Println(config.GetConfigPath())
+}
+
+func runCacheStats(cmd *cobra.Command, args []string) {
+	cacheManager, err := cache.NewManager(false, "", "", "", "", "", 0, true, false)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "初始化缓存失败: %v\n", err)
+		os.Exit(1)
+	}
+	defer cacheManager.Close()
+	
+	stats, err := cacheManager.GetCacheStats()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "获取缓存统计失败: %v\n", err)
+		os.Exit(1)
+	}
+	
+	fmt.Printf("缓存数据库路径: %s\n", cacheManager.GetDatabasePath())
+	fmt.Println("\n缓存统计:")
+	fmt.Printf("  总仓库数: %d\n", stats.TotalRepositories)
+	fmt.Printf("  已缓存描述: %d\n", stats.CachedDescriptions)
+	fmt.Printf("  缓存命中: %d 次\n", stats.CacheHits)
+	fmt.Printf("  缓存未命中: %d 次\n", stats.CacheMisses)
+	fmt.Printf("  LLM API调用: %d 次\n", stats.LLMAPICalls)
+	fmt.Printf("  最后更新: %v\n", stats.LastUpdated)
+	
+	if size, err := cacheManager.GetCacheSize(); err == nil {
+		fmt.Printf("  数据库大小: %.2f KB\n", float64(size)/1024.0)
+	}
+	
+	// 计算缓存命中率
+	totalRequests := stats.CacheHits + stats.CacheMisses
+	if totalRequests > 0 {
+		hitRate := float64(stats.CacheHits) / float64(totalRequests) * 100
+		fmt.Printf("  缓存命中率: %.1f%%\n", hitRate)
+	}
+}
+
+func runCacheClear(cmd *cobra.Command, args []string) {
+	cacheManager, err := cache.NewManager(false, "", "", "", "", "", 0, true, false)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "初始化缓存失败: %v\n", err)
+		os.Exit(1)
+	}
+	defer cacheManager.Close()
+	
+	if err := cacheManager.ClearCache(); err != nil {
+		fmt.Fprintf(os.Stderr, "清空缓存失败: %v\n", err)
+		os.Exit(1)
+	}
+	
+	fmt.Println("✅ 缓存已清空")
+}
+
+func runCacheRefresh(cmd *cobra.Command, args []string) {
+	cacheManager, err := cache.NewManager(false, "", "", "", "", "", 0, true, false)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "初始化缓存失败: %v\n", err)
+		os.Exit(1)
+	}
+	defer cacheManager.Close()
+	
+	if len(args) > 0 {
+		// 刷新指定仓库
+		repoPath := args[0]
+		if err := cacheManager.RefreshRepository(repoPath); err != nil {
+			fmt.Fprintf(os.Stderr, "刷新仓库缓存失败: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("✅ 已刷新仓库缓存: %s\n", repoPath)
+	} else {
+		// 刷新所有缓存
+		if err := cacheManager.ClearCache(); err != nil {
+			fmt.Fprintf(os.Stderr, "清空缓存失败: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("✅ 已刷新所有缓存")
+	}
+}
+
+func runCachePath(cmd *cobra.Command, args []string) {
+	cacheManager, err := cache.NewManager(false, "", "", "", "", "", 0, true, false)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "初始化缓存失败: %v\n", err)
+		os.Exit(1)
+	}
+	defer cacheManager.Close()
+	
+	fmt.Println(cacheManager.GetDatabasePath())
 }
 
 func min(a, b int) int {
