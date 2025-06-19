@@ -45,6 +45,7 @@ type ChatResponse struct {
 // GeminiRequest represents Gemini API request format
 type GeminiRequest struct {
 	Contents []struct {
+		Role  string `json:"role"`
 		Parts []struct {
 			Text string `json:"text"`
 		} `json:"parts"`
@@ -175,25 +176,37 @@ func (c *Client) chatGemini(ctx context.Context, messages []ChatMessage) (string
 	
 	// Convert messages to Gemini format
 	var contents []struct {
+		Role  string `json:"role"`
 		Parts []struct {
 			Text string `json:"text"`
 		} `json:"parts"`
 	}
 	
 	for _, msg := range messages {
-		if msg.Role == "user" || msg.Role == "system" {
-			contents = append(contents, struct {
-				Parts []struct {
-					Text string `json:"text"`
-				} `json:"parts"`
-			}{
-				Parts: []struct {
-					Text string `json:"text"`
-				}{
-					{Text: msg.Content},
-				},
-			})
+		// Map OpenAI roles to Gemini roles
+		var geminiRole string
+		switch msg.Role {
+		case "system", "user":
+			geminiRole = "user"
+		case "assistant":
+			geminiRole = "model"
+		default:
+			geminiRole = "user"
 		}
+		
+		contents = append(contents, struct {
+			Role  string `json:"role"`
+			Parts []struct {
+				Text string `json:"text"`
+			} `json:"parts"`
+		}{
+			Role: geminiRole,
+			Parts: []struct {
+				Text string `json:"text"`
+			}{
+				{Text: msg.Content},
+			},
+		})
 	}
 	
 	request := GeminiRequest{

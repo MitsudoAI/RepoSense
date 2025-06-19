@@ -17,11 +17,12 @@ import (
 )
 
 var (
-	cfg *config.Config
+	cfg       *config.Config
+	disableLLM bool
 )
 
 func main() {
-	cfg = config.DefaultConfig()
+	cfg = config.LoadConfig()
 	
 	var rootCmd = &cobra.Command{
 		Use:   "reposense",
@@ -64,9 +65,37 @@ func main() {
 	var listCmd = &cobra.Command{
 		Use:   "list [directory]",
 		Short: "列出仓库及描述",
-		Long:  "列出指定目录下的所有Git仓库，并显示项目描述。支持按时间或字母排序",
+		Long:  "列出指定目录下的所有Git仓库，并显示项目描述。默认启用LLM智能描述",
 		Args:  cobra.MaximumNArgs(1),
 		Run:   runList,
+	}
+	
+	// Config command
+	var configCmd = &cobra.Command{
+		Use:   "config",
+		Short: "配置管理",
+		Long:  "管理RepoSense的配置设置",
+	}
+	
+	var configShowCmd = &cobra.Command{
+		Use:   "show",
+		Short: "显示当前配置",
+		Long:  "显示当前的配置设置",
+		Run:   runConfigShow,
+	}
+	
+	var configSetCmd = &cobra.Command{
+		Use:   "set",
+		Short: "保存当前配置",
+		Long:  "将当前的命令行参数保存为默认配置",
+		Run:   runConfigSet,
+	}
+	
+	var configPathCmd = &cobra.Command{
+		Use:   "path",
+		Short: "显示配置文件路径",
+		Long:  "显示配置文件的完整路径",
+		Run:   runConfigPath,
 	}
 	
 	// Global flags
@@ -81,7 +110,8 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&cfg.ReportFile, "report-file", cfg.ReportFile, "报告文件路径")
 	
 	// LLM flags
-	rootCmd.PersistentFlags().BoolVar(&cfg.EnableLLM, "enable-llm", cfg.EnableLLM, "启用LLM智能描述提取")
+	rootCmd.PersistentFlags().BoolVar(&cfg.EnableLLM, "enable-llm", cfg.EnableLLM, "启用LLM智能描述提取 (默认启用)")
+	rootCmd.PersistentFlags().BoolVar(&disableLLM, "disable-llm", false, "禁用LLM智能描述提取")
 	rootCmd.PersistentFlags().StringVar(&cfg.LLMProvider, "llm-provider", cfg.LLMProvider, "LLM提供商 (openai|openai-compatible|gemini|claude|ollama)")
 	rootCmd.PersistentFlags().StringVar(&cfg.LLMModel, "llm-model", cfg.LLMModel, "LLM模型名称")
 	rootCmd.PersistentFlags().StringVar(&cfg.LLMAPIKey, "llm-api-key", cfg.LLMAPIKey, "LLM API密钥")
@@ -93,8 +123,11 @@ func main() {
 	listCmd.Flags().BoolVar(&cfg.SortByTime, "sort-by-time", cfg.SortByTime, "按更新时间排序")
 	listCmd.Flags().BoolVarP(&cfg.Reverse, "reverse", "r", cfg.Reverse, "倒序显示")
 	
+	// Add sub-commands to config
+	configCmd.AddCommand(configShowCmd, configSetCmd, configPathCmd)
+	
 	// Add commands
-	rootCmd.AddCommand(updateCmd, scanCmd, statusCmd, listCmd)
+	rootCmd.AddCommand(updateCmd, scanCmd, statusCmd, listCmd, configCmd)
 	
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
@@ -391,9 +424,61 @@ func getCurrentDirectory(args []string) string {
 	return wd
 }
 
+func runConfigShow(cmd *cobra.Command, args []string) {
+	fmt.Printf("配置文件路径: %s\n", config.GetConfigPath())
+	fmt.Println("\n当前配置:")
+	fmt.Printf("  工作协程数: %d\n", cfg.WorkerCount)
+	fmt.Printf("  超时时间: %v\n", cfg.Timeout)
+	fmt.Printf("  输出格式: %s\n", cfg.OutputFormat)
+	fmt.Printf("  启用LLM: %v\n", cfg.EnableLLM)
+	if cfg.EnableLLM {
+		fmt.Printf("  LLM提供商: %s\n", cfg.LLMProvider)
+		fmt.Printf("  LLM模型: %s\n", cfg.LLMModel)
+		fmt.Printf("  LLM基础URL: %s\n", cfg.LLMBaseURL)
+		fmt.Printf("  LLM语言: %s\n", cfg.LLMLanguage)
+		fmt.Printf("  LLM超时: %v\n", cfg.LLMTimeout)
+		if cfg.LLMAPIKey != "" {
+			fmt.Printf("  LLM API密钥: %s...%s\n", cfg.LLMAPIKey[:min(8, len(cfg.LLMAPIKey))], cfg.LLMAPIKey[max(0, len(cfg.LLMAPIKey)-4):])
+		} else {
+			fmt.Printf("  LLM API密钥: (未设置)\n")
+		}
+	}
+}
+
+func runConfigSet(cmd *cobra.Command, args []string) {
+	if err := cfg.SaveConfig(); err != nil {
+		fmt.Fprintf(os.Stderr, "保存配置失败: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("✅ 配置已保存到: %s\n", config.GetConfigPath())
+}
+
+func runConfigPath(cmd *cobra.Command, args []string) {
+	fmt.Println(config.GetConfigPath())
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 func init() {
 	// 设置字符串到ReportFormat的转换
 	cobra.OnInitialize(func() {
+		// 处理 disable-llm 标志
+		if disableLLM {
+			cfg.EnableLLM = false
+		}
+		
 		// 验证输出格式
 		switch strings.ToLower(string(cfg.OutputFormat)) {
 		case "text":
