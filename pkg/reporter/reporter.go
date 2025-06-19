@@ -13,6 +13,7 @@ import (
 
 	"github.com/schollz/progressbar/v3"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/term"
 )
 
 // ReportFormat represents different output formats
@@ -451,20 +452,50 @@ func (r *Reporter) reportListResultsText(repositories []scanner.RepositoryWithDe
 	fmt.Println()
 }
 
+// getTerminalWidth returns the terminal width, with fallback
+func getTerminalWidth() int {
+	width, _, err := term.GetSize(int(os.Stdout.Fd()))
+	if err != nil || width < 80 {
+		// 如果无法获取终端宽度或宽度太小，使用默认值
+		return 120
+	}
+	return width
+}
+
 // reportListResultsTable reports list results in table format
 func (r *Reporter) reportListResultsTable(repositories []scanner.RepositoryWithDescription) {
-	fmt.Printf("%-30s %-50s %-20s\n", "仓库名称", "描述", "最后更新")
-	fmt.Println(strings.Repeat("-", 105))
+	termWidth := getTerminalWidth()
+	
+	// 计算各列宽度，为描述留出尽可能多的空间
+	nameWidth := 35
+	dateWidth := 20
+	padding := 4 // 列间空隙
+	
+	// 描述列使用剩余的宽度
+	descWidth := termWidth - nameWidth - dateWidth - padding
+	if descWidth < 50 {
+		// 最小描述宽度
+		descWidth = 50
+	}
+	if descWidth > 120 {
+		// 最大描述宽度，避免行太长难以阅读
+		descWidth = 120
+	}
+	
+	totalWidth := nameWidth + descWidth + dateWidth + padding
+	
+	fmt.Printf("%-*s %-*s %-*s\n", nameWidth, "仓库名称", descWidth, "描述", dateWidth, "最后更新")
+	fmt.Println(strings.Repeat("-", totalWidth))
 	
 	for _, repo := range repositories {
 		name := repo.Name
-		if len(name) > 28 {
-			name = name[:25] + "..."
+		if len(name) > nameWidth-2 {
+			name = name[:nameWidth-5] + "..."
 		}
 		
 		description := repo.Description
-		if len(description) > 48 {
-			description = description[:45] + "..."
+		if len(description) > descWidth-2 {
+			description = description[:descWidth-5] + "..."
 		}
 		
 		lastUpdate := ""
@@ -472,7 +503,7 @@ func (r *Reporter) reportListResultsTable(repositories []scanner.RepositoryWithD
 			lastUpdate = repo.LastCommitDate.Format("2006-01-02 15:04")
 		}
 		
-		fmt.Printf("%-30s %-50s %-20s\n", name, description, lastUpdate)
+		fmt.Printf("%-*s %-*s %-*s\n", nameWidth, name, descWidth, description, dateWidth, lastUpdate)
 	}
 	fmt.Println()
 }
