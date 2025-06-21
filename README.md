@@ -11,6 +11,7 @@ RepoSense 是一个高效的 Git 仓库批量管理工具，专为需要管理�
 - 🚀 **并行更新**: 使用工作池模式并行执行批量 `git pull` 操作
 - 📊 **状态收集**: 获取仓库详细状态信息（分支、提交、工作区状态等）
 - 📋 **仓库列表**: 列出仓库及其描述，自动从README提取项目描述
+- 🏆 **质量评分**: 基于README、LICENSE、测试、CI等维度的0-10分质量评估
 - 🤖 **LLM智能描述**: 支持OpenAI、Gemini、Claude、Ollama等LLM API智能生成项目描述
 - 🌍 **多语言支持**: 支持中文、英文、日文的项目描述生成
 - 🔤 **智能排序**: 支持按时间或字母排序，可正序/倒序显示
@@ -85,6 +86,18 @@ reposense list --exclude test --sort-by-time
 
 # 按时间排序并保存为表格格式
 reposense list --sort-by-time --format table --save-report
+
+# 分析仓库质量并生成评分
+reposense analyze /path/to/repositories
+
+# 搜索高质量项目（评分7分以上）
+reposense metadata search --min-quality 7.0
+
+# 搜索Go语言项目
+reposense metadata search --language Go
+
+# 搜索命令行工具类项目
+reposense metadata search --project-type cli-tool
 
 # 使用LLM智能生成中文描述
 export OPENAI_API_KEY=your_api_key  
@@ -239,6 +252,13 @@ RepoSense 支持通过命令行参数进行配置，未来计划支持配置文�
   "timestamp": "2023-12-01T10:00:01Z"
 }
 ```
+
+## 📖 详细文档
+
+- [**质量评分算法**](QUALITY_SCORING.md) - 详细了解 RepoSense 如何评估代码仓库质量
+- [**缓存系统设计**](CACHE_SYSTEM.md) - 了解 LLM 缓存机制和性能优化
+- [**Git 操作说明**](GIT_OPERATIONS.md) - Git 命令执行和安全性说明
+- [**系统设计文档**](DESIGN.md) - 完整的架构设计和实现细节
 
 ## 🤝 贡献
 
