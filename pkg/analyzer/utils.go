@@ -37,22 +37,7 @@ func IsTextFile(filename string) bool {
 		"sql": true, "r": true, "m": true, "swift": true, "kt": true, "scala": true, "clj": true, "hs": true,
 		"ml": true, "fs": true, "elm": true, "dart": true, "vue": true, "svelte": true, "config": true, "conf": true,
 		"ini": true, "toml": true, "lock": true, "log": true, "csv": true, "tsv": true,
-		"mod": true, "sum": true, "cmake": true, "gradle": true, "properties": true, "gitignore": true, "dockerignore": true,
-		"editorconfig": true, "env": true, "example": true, "template": true, "sample": true,
-		// Web and markup
-		"handlebars": true, "hbs": true, "mustache": true, "twig": true, "jinja": true, "jinja2": true,
-		// Data formats  
-		"graphql": true, "gql": true, "proto": true, "avro": true, "thrift": true,
-		// Scripting and automation
-		"lua": true, "perl": true, "pl": true, "tcl": true, "awk": true, "sed": true,
-		// Functional programming
-		"lisp": true, "scm": true, "cljs": true, "erl": true, "ex": true, "exs": true,
-		// Systems programming
-		"asm": true, "s": true, "nasm": true,
-		// Other languages
-		"vb": true, "vbs": true, "pas": true, "pp": true, "ada": true, "adb": true, "ads": true,
-		"f": true, "f90": true, "f95": true, "f03": true, "f08": true, "for": true, "ftn": true,
-		"cob": true, "cobol": true, "cbl": true,
+		"mod": true, "sum": true, "cmake": true, "gradle": true, "properties": true, "gitignore": true,
 	}
 	
 	// Check extension first
@@ -64,14 +49,8 @@ func IsTextFile(filename string) bool {
 	// Check special filenames without extensions
 	lowerFilename := strings.ToLower(filename)
 	specialTextFiles := map[string]bool{
-		"makefile": true, "dockerfile": true, "rakefile": true, "gemfile": true, "guardfile": true,
-		"podfile": true, "vagrantfile": true, "cmakelists.txt": true, "cmakelist.txt": true,
-		"readme": true, "license": true, "copying": true, "authors": true, "contributors": true,
-		"changelog": true, "changes": true, "news": true, "history": true, "install": true,
-		"todo": true, "bugs": true, "thanks": true, "acknowledgments": true,
-		"gitignore": true, "gitmodules": true, "gitattributes": true,
-		"dockerignore": true, "bashrc": true, "zshrc": true, "profile": true,
-		"vimrc": true, "tmux.conf": true, "screenrc": true,
+		"makefile": true, "dockerfile": true, "readme": true, "license": true, "copying": true,
+		"changelog": true, "gitignore": true, "gitmodules": true, "gitattributes": true,
 	}
 	
 	return specialTextFiles[lowerFilename] || specialTextFiles[strings.TrimPrefix(lowerFilename, ".")]
