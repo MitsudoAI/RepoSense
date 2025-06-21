@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 	"github.com/sirupsen/logrus"
 )
 
@@ -43,8 +43,9 @@ type CacheStats struct {
 
 // Cache represents the metadata cache manager
 type Cache struct {
-	db     *sql.DB
-	logger *logrus.Logger
+	db            *sql.DB
+	logger        *logrus.Logger
+	metadataCache *MetadataCache
 }
 
 // NewCache creates a new cache instance
@@ -58,7 +59,7 @@ func NewCache(dbPath string) (*Cache, error) {
 	}
 
 	// 打开数据库连接
-	db, err := sql.Open("sqlite3", dbPath+"?_foreign_keys=on")
+	db, err := sql.Open("sqlite", dbPath+"?_foreign_keys=on")
 	if err != nil {
 		return nil, fmt.Errorf("打开数据库失败: %w", err)
 	}
@@ -73,6 +74,9 @@ func NewCache(dbPath string) (*Cache, error) {
 		db.Close()
 		return nil, fmt.Errorf("初始化数据库失败: %w", err)
 	}
+
+	// 初始化metadata cache
+	cache.metadataCache = NewMetadataCache(cache)
 
 	return cache, nil
 }
@@ -90,8 +94,14 @@ func (c *Cache) SetLogLevel(level logrus.Level) {
 	c.logger.SetLevel(level)
 }
 
+// GetMetadataCache returns the metadata cache instance
+func (c *Cache) GetMetadataCache() *MetadataCache {
+	return c.metadataCache
+}
+
 // initDatabase initializes the database schema
 func (c *Cache) initDatabase() error {
+	// First, run the main schema
 	schema, err := schemaFS.ReadFile("schema.sql")
 	if err != nil {
 		return fmt.Errorf("读取schema文件失败: %w", err)
@@ -101,8 +111,61 @@ func (c *Cache) initDatabase() error {
 		return fmt.Errorf("执行schema失败: %w", err)
 	}
 
+	// Check if migration is needed and perform it
+	if err := c.migrateDatabase(); err != nil {
+		return fmt.Errorf("数据库迁移失败: %w", err)
+	}
+
 	c.logger.Debug("数据库初始化完成")
 	return nil
+}
+
+// migrateDatabase performs database migrations to ensure compatibility
+func (c *Cache) migrateDatabase() error {
+	// Check if repository_languages table has the new columns
+	var columnCount int
+	err := c.db.QueryRow(`
+		SELECT COUNT(*) 
+		FROM pragma_table_info('repository_languages') 
+		WHERE name IN ('file_count', 'bytes_count', 'updated_at')
+	`).Scan(&columnCount)
+	
+	if err != nil {
+		return fmt.Errorf("检查表结构失败: %w", err)
+	}
+
+	// If we don't have all 3 new columns, we need to migrate
+	if columnCount < 3 {
+		c.logger.Info("检测到旧版本数据库，正在执行迁移...")
+		
+		// Add missing columns to repository_languages table
+		migrations := []string{
+			"ALTER TABLE repository_languages ADD COLUMN file_count INTEGER DEFAULT 0",
+			"ALTER TABLE repository_languages ADD COLUMN bytes_count INTEGER DEFAULT 0", 
+			"ALTER TABLE repository_languages ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP",
+		}
+
+		for _, migration := range migrations {
+			if _, err := c.db.Exec(migration); err != nil {
+				// If the column already exists, ignore the error
+				if !isColumnExistsError(err) {
+					return fmt.Errorf("执行迁移失败 [%s]: %w", migration, err)
+				}
+			}
+		}
+		
+		c.logger.Info("数据库迁移完成")
+	}
+
+	return nil
+}
+
+// isColumnExistsError checks if the error is due to column already existing
+func isColumnExistsError(err error) bool {
+	return err != nil && (
+		fmt.Sprintf("%v", err) == "duplicate column name: file_count" ||
+		fmt.Sprintf("%v", err) == "duplicate column name: bytes_count" ||
+		fmt.Sprintf("%v", err) == "duplicate column name: updated_at")
 }
 
 // GetCachedDescription retrieves cached description for a repository
@@ -193,8 +256,16 @@ func (c *Cache) ClearCache() error {
 	}
 	defer tx.Rollback()
 	
-	// 清空所有表
-	tables := []string{"repository_languages", "repository_tags", "repositories"}
+	// 清空所有表（按照外键依赖顺序）
+	tables := []string{
+		"repository_dependencies", 
+		"repository_licenses", 
+		"repository_frameworks", 
+		"repository_metadata", 
+		"repository_languages", 
+		"repository_tags", 
+		"repositories",
+	}
 	for _, table := range tables {
 		if _, err := tx.Exec(fmt.Sprintf("DELETE FROM %s", table)); err != nil {
 			return fmt.Errorf("清空表 %s 失败: %w", table, err)

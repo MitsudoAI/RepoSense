@@ -1,12 +1,15 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"reposense/internal/config"
+	"reposense/pkg/analyzer"
 	"reposense/pkg/cache"
 	"reposense/pkg/llm"
 	"reposense/pkg/reporter"
@@ -24,6 +27,14 @@ var (
 	gitAllowInteractive bool
 	enableCache         bool
 	forceRefresh        bool
+	// Analyzer flags
+	includeLanguages    bool
+	includeFrameworks   bool
+	includeLicenses     bool
+	includeDependencies bool
+	deepAnalysis        bool
+	maxFileSize         int64
+	maxFiles            int
 )
 
 func main() {
@@ -139,6 +150,52 @@ func main() {
 		Run:   runCachePath,
 	}
 	
+	// Analyze command
+	var analyzeCmd = &cobra.Command{
+		Use:   "analyze [directory]",
+		Short: "分析仓库元数据",
+		Long:  "深度分析指定目录下的所有Git仓库，包括编程语言、框架、许可证等详细信息",
+		Args:  cobra.MaximumNArgs(1),
+		Run:   runAnalyze,
+	}
+	
+	// Metadata command
+	var metadataCmd = &cobra.Command{
+		Use:   "metadata",
+		Short: "元数据管理",
+		Long:  "管理和查询已分析的仓库元数据",
+	}
+	
+	var metadataShowCmd = &cobra.Command{
+		Use:   "show [repository]",
+		Short: "显示元数据",
+		Long:  "显示指定仓库的详细元数据信息",
+		Args:  cobra.MaximumNArgs(1),
+		Run:   runMetadataShow,
+	}
+	
+	var metadataStatsCmd = &cobra.Command{
+		Use:   "stats",
+		Short: "元数据统计",
+		Long:  "显示所有仓库的元数据统计信息",
+		Run:   runMetadataStats,
+	}
+	
+	var metadataSearchCmd = &cobra.Command{
+		Use:   "search",
+		Short: "搜索仓库",
+		Long:  "根据元数据条件搜索仓库",
+		Run:   runMetadataSearch,
+	}
+	
+	var metadataExportCmd = &cobra.Command{
+		Use:   "export [repository]",
+		Short: "导出元数据",
+		Long:  "导出指定仓库的元数据为JSON格式",
+		Args:  cobra.MaximumNArgs(1),
+		Run:   runMetadataExport,
+	}
+	
 	// Global flags
 	rootCmd.PersistentFlags().IntVarP(&cfg.WorkerCount, "workers", "w", cfg.WorkerCount, "并发工作协程数量 (1-50)")
 	rootCmd.PersistentFlags().DurationVarP(&cfg.Timeout, "timeout", "t", cfg.Timeout, "每个操作的超时时间")
@@ -172,14 +229,33 @@ func main() {
 	listCmd.Flags().BoolVar(&cfg.SortByTime, "sort-by-time", cfg.SortByTime, "按更新时间排序")
 	listCmd.Flags().BoolVarP(&cfg.Reverse, "reverse", "r", cfg.Reverse, "倒序显示")
 	
+	// Analyze command specific flags
+	analyzeCmd.Flags().BoolVar(&includeLanguages, "include-languages", true, "包含编程语言检测")
+	analyzeCmd.Flags().BoolVar(&includeFrameworks, "include-frameworks", true, "包含框架检测")
+	analyzeCmd.Flags().BoolVar(&includeLicenses, "include-licenses", true, "包含许可证检测")
+	analyzeCmd.Flags().BoolVar(&includeDependencies, "include-dependencies", true, "包含依赖分析")
+	analyzeCmd.Flags().BoolVar(&deepAnalysis, "deep-analysis", false, "启用深度分析（更详细但更慢）")
+	analyzeCmd.Flags().Int64Var(&maxFileSize, "max-file-size", 1024*1024, "最大文件大小（字节）")
+	analyzeCmd.Flags().IntVar(&maxFiles, "max-files", 10000, "最大文件数量")
+	
+	// Metadata search flags
+	metadataSearchCmd.Flags().String("language", "", "按主要编程语言过滤")
+	metadataSearchCmd.Flags().String("project-type", "", "按项目类型过滤")
+	metadataSearchCmd.Flags().Int("min-lines", 0, "最小代码行数")
+	metadataSearchCmd.Flags().Int("max-lines", 0, "最大代码行数")
+	metadataSearchCmd.Flags().Float64("min-quality", 0.0, "最小质量评分")
+	
 	// Add sub-commands to config
 	configCmd.AddCommand(configShowCmd, configSetCmd, configPathCmd)
 	
 	// Add sub-commands to cache
 	cacheCmd.AddCommand(cacheStatsCmd, cacheClearCmd, cacheRefreshCmd, cachePathCmd)
 	
+	// Add sub-commands to metadata
+	metadataCmd.AddCommand(metadataShowCmd, metadataStatsCmd, metadataSearchCmd, metadataExportCmd)
+	
 	// Add commands
-	rootCmd.AddCommand(updateCmd, scanCmd, statusCmd, listCmd, configCmd, cacheCmd)
+	rootCmd.AddCommand(updateCmd, scanCmd, statusCmd, listCmd, analyzeCmd, metadataCmd, configCmd, cacheCmd)
 	
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
@@ -623,6 +699,512 @@ func runCachePath(cmd *cobra.Command, args []string) {
 	defer cacheManager.Close()
 	
 	fmt.Println(cacheManager.GetDatabasePath())
+}
+
+func runAnalyze(cmd *cobra.Command, args []string) {
+	directory := getCurrentDirectory(args)
+	
+	if err := cfg.Validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "配置错误: %v\n", err)
+		os.Exit(1)
+	}
+	
+	// 初始化缓存管理器
+	cacheManager, err := cache.NewManager(false, "", "", "", "", "", 0, true, false)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "初始化缓存失败: %v\n", err)
+		os.Exit(1)
+	}
+	defer cacheManager.Close()
+	
+	// 初始化分析服务
+	var metadataService *analyzer.MetadataService
+	if cfg.EnableLLM {
+		// 检查LLM配置
+		if cfg.LLMAPIKey == "" {
+			if key := os.Getenv("OPENAI_API_KEY"); key != "" && cfg.LLMProvider == "openai" {
+				cfg.LLMAPIKey = key
+			} else if key := os.Getenv("GEMINI_API_KEY"); key != "" && cfg.LLMProvider == "gemini" {
+				cfg.LLMAPIKey = key
+			} else if key := os.Getenv("CLAUDE_API_KEY"); key != "" && cfg.LLMProvider == "claude" {
+				cfg.LLMAPIKey = key
+			} else if key := os.Getenv("LLM_API_KEY"); key != "" {
+				cfg.LLMAPIKey = key
+			}
+		}
+		
+		if err := llm.ValidateConfiguration(llm.Provider(cfg.LLMProvider), cfg.LLMAPIKey, cfg.LLMBaseURL); err != nil {
+			fmt.Fprintf(os.Stderr, "LLM配置错误: %v\n", err)
+			fmt.Println("提示: 使用 --llm-api-key 设置API密钥，或设置环境变量")
+			os.Exit(1)
+		}
+		
+		// 创建LLM服务
+		llmService := llm.NewDescriptionService(
+			llm.Provider(cfg.LLMProvider), 
+			cfg.LLMModel, 
+			cfg.LLMAPIKey, 
+			cfg.LLMBaseURL, 
+			cfg.LLMLanguage, 
+			cfg.LLMTimeout,
+			true,
+		)
+		metadataService = analyzer.NewMetadataServiceWithLLM(llmService)
+		
+		fmt.Printf("🤖 已启用LLM增强分析 (提供商: %s, 模型: %s, 语言: %s)\n", 
+			cfg.LLMProvider, cfg.LLMModel, cfg.LLMLanguage)
+	} else {
+		metadataService = analyzer.NewMetadataService()
+	}
+	
+	// 设置日志级别
+	if cfg.Verbose {
+		metadataService.SetLogLevel(logrus.DebugLevel)
+	}
+	
+	// 配置分析参数
+	analysisConfig := &analyzer.AnalysisConfig{
+		IncludeLanguages:    includeLanguages,
+		IncludeFrameworks:   includeFrameworks,
+		IncludeLicenses:     includeLicenses,
+		IncludeDependencies: includeDependencies,
+		IgnorePatterns:      cfg.ExcludePatterns,
+		MaxFileSize:         maxFileSize,
+		MaxFiles:            maxFiles,
+		DeepAnalysis:        deepAnalysis,
+	}
+	
+	// 扫描仓库
+	fmt.Printf("🔍 正在扫描目录: %s\n", directory)
+	scannerInstance := scanner.NewScanner()
+	if cfg.Verbose {
+		scannerInstance.SetLogLevel(logrus.DebugLevel)
+	}
+	
+	repositories, err := scannerInstance.ScanDirectoryWithFilter(directory, cfg.IncludePatterns, cfg.ExcludePatterns)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "扫描失败: %v\n", err)
+		os.Exit(1)
+	}
+	
+	if len(repositories) == 0 {
+		fmt.Println("未发现任何Git仓库")
+		return
+	}
+	
+	fmt.Printf("📦 发现 %d 个Git仓库，开始元数据分析...\n", len(repositories))
+	
+	// 获取缓存实例
+	cacheInstance := cacheManager.GetCache()
+	if cacheInstance == nil {
+		fmt.Fprintf(os.Stderr, "无法获取缓存实例\n")
+		os.Exit(1)
+	}
+	metadataCache := cacheInstance.GetMetadataCache()
+	
+	// 分析每个仓库
+	totalRepos := len(repositories)
+	for i, repo := range repositories {
+		fmt.Printf("[%d/%d] 正在分析: %s\n", i+1, totalRepos, repo.Name)
+		
+		// 检查缓存
+		var metadata *analyzer.ProjectMetadata
+		if !forceRefresh {
+			structureHash, err := analyzer.GenerateStructureHash(repo.Path, analysisConfig.IgnorePatterns)
+			if err == nil {
+				if cachedMetadata, found := metadataCache.GetCachedMetadata(repo.Path, structureHash); found {
+					metadata = cachedMetadata
+					fmt.Printf("  ✓ 使用缓存数据\n")
+				}
+			}
+		}
+		
+		// 如果没有缓存，执行分析
+		if metadata == nil {
+			analyzedMetadata, err := metadataService.AnalyzeRepository(repo.Path, analysisConfig)
+			if err != nil {
+				fmt.Printf("  ✗ 分析失败: %v\n", err)
+				continue
+			}
+			metadata = analyzedMetadata
+			
+			// 保存到缓存
+			if err := metadataCache.SaveMetadata(repo.Path, repo.Name, metadata); err != nil {
+				fmt.Printf("  ⚠ 保存缓存失败: %v\n", err)
+			}
+			
+			fmt.Printf("  ✓ 分析完成\n")
+		}
+		
+		// 显示关键信息
+		fmt.Printf("    语言: %s | 项目类型: %s | 代码行数: %d | 质量评分: %.1f\n",
+			metadata.MainLanguage, metadata.ProjectType, metadata.TotalLinesOfCode, metadata.QualityScore)
+	}
+	
+	fmt.Printf("\n🎉 元数据分析完成！共分析 %d 个仓库\n", totalRepos)
+	fmt.Println("使用 'reposense metadata stats' 查看统计信息")
+	fmt.Println("使用 'reposense metadata search' 搜索仓库")
+	
+	// 保存分析报告
+	if cfg.SaveReport {
+		filename := cfg.ReportFile
+		if filename == "" {
+			filename = fmt.Sprintf("reposense-analyze-%s.json", time.Now().Format("20060102-150405"))
+		}
+		
+		// 收集所有分析结果
+		var allMetadata []map[string]interface{}
+		for _, repo := range repositories {
+			// 获取每个仓库的元数据
+			structureHash, _ := analyzer.GenerateStructureHash(repo.Path, analysisConfig.IgnorePatterns)
+			if metadata, found := metadataCache.GetCachedMetadata(repo.Path, structureHash); found {
+				metadataService := analyzer.NewMetadataService()
+				report := metadataService.GetAnalysisReport(metadata)
+				report["repository_name"] = repo.Name
+				report["repository_path"] = repo.Path
+				allMetadata = append(allMetadata, report)
+			}
+		}
+		
+		reportData := map[string]interface{}{
+			"analysis_summary": map[string]interface{}{
+				"total_repositories": totalRepos,
+				"analyzed_at":       time.Now(),
+				"analysis_config":   analysisConfig,
+			},
+			"repositories": allMetadata,
+		}
+		
+		if jsonData, err := json.MarshalIndent(reportData, "", "  "); err == nil {
+			if err := os.WriteFile(filename, jsonData, 0644); err != nil {
+				fmt.Fprintf(os.Stderr, "保存报告失败: %v\n", err)
+			} else {
+				fmt.Printf("📄 分析报告已保存到: %s\n", filename)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "生成报告JSON失败: %v\n", err)
+		}
+	}
+}
+
+func runMetadataShow(cmd *cobra.Command, args []string) {
+	var repoPath string
+	if len(args) > 0 {
+		repoPath = args[0]
+	} else {
+		repoPath = getCurrentDirectory(args)
+	}
+	
+	// 转换为绝对路径
+	absPath, err := filepath.Abs(repoPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "路径解析失败: %v\n", err)
+		os.Exit(1)
+	}
+	
+	// 初始化缓存管理器
+	cacheManager, err := cache.NewManager(false, "", "", "", "", "", 0, true, false)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "初始化缓存失败: %v\n", err)
+		os.Exit(1)
+	}
+	defer cacheManager.Close()
+	
+	cacheInstance := cacheManager.GetCache()
+	if cacheInstance == nil {
+		fmt.Fprintf(os.Stderr, "无法获取缓存实例\n")
+		os.Exit(1)
+	}
+	metadataCache := cacheInstance.GetMetadataCache()
+	
+	// 查找元数据
+	metadata, found := metadataCache.GetCachedMetadata(absPath, "")
+	if !found {
+		fmt.Printf("未找到仓库的元数据: %s\n", absPath)
+		fmt.Println("请先运行 'reposense analyze' 分析仓库")
+		os.Exit(1)
+	}
+	
+	// 显示详细信息
+	fmt.Printf("仓库路径: %s\n", absPath)
+	fmt.Printf("项目类型: %s\n", metadata.ProjectType)
+	fmt.Printf("主要语言: %s\n", metadata.MainLanguage)
+	fmt.Printf("总代码行数: %d\n", metadata.TotalLinesOfCode)
+	fmt.Printf("文件数量: %d\n", metadata.FileCount)
+	fmt.Printf("目录数量: %d\n", metadata.DirectoryCount)
+	fmt.Printf("仓库大小: %.2f MB\n", float64(metadata.RepositorySize)/(1024*1024))
+	fmt.Printf("复杂度评分: %.1f/10.0\n", metadata.ComplexityScore)
+	fmt.Printf("质量评分: %.1f/10.0\n", metadata.QualityScore)
+	fmt.Printf("分析时间: %s\n", metadata.AnalyzedAt.Format("2006-01-02 15:04:05"))
+	
+	// 显示项目描述
+	if metadata.Description != "" {
+		fmt.Printf("\n项目描述:\n%s\n", metadata.Description)
+	}
+	
+	if metadata.EnhancedDescription != "" {
+		fmt.Printf("\n详细描述:\n%s\n", metadata.EnhancedDescription)
+	}
+	
+	// 项目特征
+	fmt.Printf("\n项目特征:\n")
+	fmt.Printf("  有README: %v\n", metadata.HasReadme)
+	fmt.Printf("  有LICENSE: %v\n", metadata.HasLicense)
+	fmt.Printf("  有测试: %v\n", metadata.HasTests)
+	fmt.Printf("  有CI: %v\n", metadata.HasCI)
+	fmt.Printf("  有文档: %v\n", metadata.HasDocs)
+	
+	// 编程语言
+	if len(metadata.Languages) > 0 {
+		fmt.Printf("\n编程语言:\n")
+		for _, lang := range metadata.Languages {
+			fmt.Printf("  %s: %.1f%% (%d 行)\n", lang.Name, lang.Percentage, lang.LinesOfCode)
+		}
+	}
+	
+	// 框架
+	if len(metadata.Frameworks) > 0 {
+		fmt.Printf("\n框架/库:\n")
+		for _, framework := range metadata.Frameworks {
+			version := framework.Version
+			if version == "" {
+				version = "未知版本"
+			}
+			fmt.Printf("  %s (%s): %s - 置信度: %.1f%%\n", 
+				framework.Name, framework.Category, version, framework.Confidence*100)
+		}
+	}
+	
+	// 许可证
+	if len(metadata.Licenses) > 0 {
+		fmt.Printf("\n许可证:\n")
+		for _, license := range metadata.Licenses {
+			fmt.Printf("  %s (%s): %s - 置信度: %.1f%%\n", 
+				license.Name, license.Key, license.Type, license.Confidence*100)
+		}
+	}
+	
+	// 主要依赖
+	if len(metadata.Dependencies) > 0 {
+		fmt.Printf("\n主要依赖 (前10个):\n")
+		limit := 10
+		if len(metadata.Dependencies) < limit {
+			limit = len(metadata.Dependencies)
+		}
+		for i := 0; i < limit; i++ {
+			dep := metadata.Dependencies[i]
+			version := dep.Version
+			if version == "" {
+				version = "未指定"
+			}
+			fmt.Printf("  %s: %s (%s)\n", dep.Name, version, dep.Type)
+		}
+		if len(metadata.Dependencies) > 10 {
+			fmt.Printf("  ... 还有 %d 个依赖\n", len(metadata.Dependencies)-10)
+		}
+	}
+}
+
+func runMetadataStats(cmd *cobra.Command, args []string) {
+	// 初始化缓存管理器
+	cacheManager, err := cache.NewManager(false, "", "", "", "", "", 0, true, false)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "初始化缓存失败: %v\n", err)
+		os.Exit(1)
+	}
+	defer cacheManager.Close()
+	
+	cacheInstance := cacheManager.GetCache()
+	if cacheInstance == nil {
+		fmt.Fprintf(os.Stderr, "无法获取缓存实例\n")
+		os.Exit(1)
+	}
+	metadataCache := cacheInstance.GetMetadataCache()
+	
+	stats, err := metadataCache.GetMetadataStats()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "获取元数据统计失败: %v\n", err)
+		os.Exit(1)
+	}
+	
+	// 根据输出格式显示统计信息
+	switch cfg.OutputFormat {
+	case reporter.FormatJSON:
+		if jsonData, err := json.MarshalIndent(stats, "", "  "); err == nil {
+			fmt.Println(string(jsonData))
+		} else {
+			fmt.Fprintf(os.Stderr, "JSON序列化失败: %v\n", err)
+		}
+	default:
+		fmt.Println("元数据统计:")
+		fmt.Printf("  已分析仓库: %d 个\n", stats["repositories_with_metadata"])
+		
+		if avgComplexity, ok := stats["average_complexity_score"]; ok {
+			fmt.Printf("  平均复杂度: %.1f/10.0\n", avgComplexity)
+		}
+		
+		if avgQuality, ok := stats["average_quality_score"]; ok {
+			fmt.Printf("  平均质量: %.1f/10.0\n", avgQuality)
+		}
+		
+		// 显示热门语言
+		if topLangs, ok := stats["top_languages"].(map[string]int); ok && len(topLangs) > 0 {
+			fmt.Printf("\n热门编程语言:\n")
+			for lang, count := range topLangs {
+				fmt.Printf("  %s: %d 个项目\n", lang, count)
+			}
+		}
+		
+		// 显示热门框架
+		if topFrameworks, ok := stats["top_frameworks"].(map[string]int); ok && len(topFrameworks) > 0 {
+			fmt.Printf("\n热门框架:\n")
+			for framework, count := range topFrameworks {
+				fmt.Printf("  %s: %d 个项目\n", framework, count)
+			}
+		}
+		
+		// 显示许可证分布
+		if topLicenses, ok := stats["top_licenses"].(map[string]int); ok && len(topLicenses) > 0 {
+			fmt.Printf("\n许可证分布:\n")
+			for license, count := range topLicenses {
+				fmt.Printf("  %s: %d 个项目\n", license, count)
+			}
+		}
+	}
+}
+
+func runMetadataSearch(cmd *cobra.Command, args []string) {
+	// 获取搜索条件
+	criteria := make(map[string]interface{})
+	
+	if language, _ := cmd.Flags().GetString("language"); language != "" {
+		criteria["language"] = language
+	}
+	
+	if projectType, _ := cmd.Flags().GetString("project-type"); projectType != "" {
+		criteria["project_type"] = projectType
+	}
+	
+	if minLines, _ := cmd.Flags().GetInt("min-lines"); minLines > 0 {
+		criteria["min_lines_of_code"] = minLines
+	}
+	
+	if maxLines, _ := cmd.Flags().GetInt("max-lines"); maxLines > 0 {
+		criteria["max_lines_of_code"] = maxLines
+	}
+	
+	if minQuality, _ := cmd.Flags().GetFloat64("min-quality"); minQuality > 0 {
+		criteria["min_quality_score"] = minQuality
+	}
+	
+	// 初始化缓存管理器
+	cacheManager, err := cache.NewManager(false, "", "", "", "", "", 0, true, false)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "初始化缓存失败: %v\n", err)
+		os.Exit(1)
+	}
+	defer cacheManager.Close()
+	
+	cacheInstance := cacheManager.GetCache()
+	if cacheInstance == nil {
+		fmt.Fprintf(os.Stderr, "无法获取缓存实例\n")
+		os.Exit(1)
+	}
+	metadataCache := cacheInstance.GetMetadataCache()
+	
+	// 执行搜索
+	results, err := metadataCache.SearchRepositories(criteria)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "搜索失败: %v\n", err)
+		os.Exit(1)
+	}
+	
+	if len(results) == 0 {
+		fmt.Println("未找到匹配的仓库")
+		return
+	}
+	
+	// 根据输出格式显示结果
+	switch cfg.OutputFormat {
+	case reporter.FormatJSON:
+		if jsonData, err := json.MarshalIndent(map[string]interface{}{
+			"total_matches": len(results),
+			"repositories": results,
+		}, "", "  "); err == nil {
+			fmt.Println(string(jsonData))
+		} else {
+			fmt.Fprintf(os.Stderr, "JSON序列化失败: %v\n", err)
+		}
+	default:
+		fmt.Printf("找到 %d 个匹配的仓库:\n\n", len(results))
+		
+		// 显示搜索结果
+		for i, result := range results {
+			fmt.Printf("%d. %s\n", i+1, result["name"])
+			fmt.Printf("   路径: %s\n", result["path"])
+			fmt.Printf("   类型: %s | 语言: %s | 代码行数: %d\n", 
+				result["project_type"], result["main_language"], result["total_lines_of_code"])
+			fmt.Printf("   复杂度: %.1f | 质量: %.1f\n", 
+				result["complexity_score"], result["quality_score"])
+			fmt.Println()
+		}
+	}
+}
+
+func runMetadataExport(cmd *cobra.Command, args []string) {
+	var repoPath string
+	if len(args) > 0 {
+		repoPath = args[0]
+	} else {
+		repoPath = getCurrentDirectory(args)
+	}
+	
+	// 转换为绝对路径
+	absPath, err := filepath.Abs(repoPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "路径解析失败: %v\n", err)
+		os.Exit(1)
+	}
+	
+	// 初始化缓存管理器
+	cacheManager, err := cache.NewManager(false, "", "", "", "", "", 0, true, false)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "初始化缓存失败: %v\n", err)
+		os.Exit(1)
+	}
+	defer cacheManager.Close()
+	
+	cacheInstance := cacheManager.GetCache()
+	if cacheInstance == nil {
+		fmt.Fprintf(os.Stderr, "无法获取缓存实例\n")
+		os.Exit(1)
+	}
+	metadataCache := cacheInstance.GetMetadataCache()
+	
+	// 导出元数据
+	jsonData, err := metadataCache.ExportMetadata(absPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "导出失败: %v\n", err)
+		os.Exit(1)
+	}
+	
+	// 输出到标准输出或文件
+	if cfg.SaveReport {
+		filename := cfg.ReportFile
+		if filename == "" {
+			repoName := filepath.Base(absPath)
+			filename = fmt.Sprintf("metadata-%s-%s.json", repoName, time.Now().Format("20060102-150405"))
+		}
+		
+		if err := os.WriteFile(filename, []byte(jsonData), 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "保存文件失败: %v\n", err)
+			os.Exit(1)
+		}
+		
+		fmt.Printf("✅ 元数据已导出到: %s\n", filename)
+	} else {
+		fmt.Println(jsonData)
+	}
 }
 
 func min(a, b int) int {

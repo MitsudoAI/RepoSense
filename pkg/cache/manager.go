@@ -157,6 +157,11 @@ func (m *Manager) GetDatabasePath() string {
 	return m.config.DatabasePath
 }
 
+// GetCache returns the cache instance
+func (m *Manager) GetCache() *Cache {
+	return m.cache
+}
+
 // getCacheDirectory returns the cache directory path
 func getCacheDirectory() string {
 	// 尝试使用 XDG_CACHE_HOME

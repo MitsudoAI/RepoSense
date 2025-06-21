@@ -40,4 +40,11 @@ Thumbs.db
 
 # Reports and logs
 *.log
-reposense-*.json
+reposense-*.json# Build artifacts
+build/
+tmp/
+*.log
+coverage.out
+coverage.html
+reposense
+reposense-*
