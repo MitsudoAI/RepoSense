@@ -184,7 +184,25 @@ func main() {
 	var metadataSearchCmd = &cobra.Command{
 		Use:   "search",
 		Short: "搜索仓库",
-		Long:  "根据元数据条件搜索仓库",
+		Long: `根据元数据条件搜索仓库
+
+常用编程语言:
+  Go, Python, JavaScript, TypeScript, Java, C, C++, C#, PHP, Ruby, 
+  Rust, Swift, Kotlin, Scala, R, MATLAB, Shell, PowerShell, HTML, CSS, 
+  SCSS, Vue, Svelte, XML, JSON, YAML, Makefile, Dockerfile, SQL
+
+常用项目类型:
+  library, application, cli-tool, web-app, mobile-app, desktop-app, 
+  frontend-app, backend-service, fullstack-app, api, microservice,
+  documentation, script, plugin, extension, template, tutorial, demo
+
+参数取值示例:
+  --language Go           # 搜索Go语言项目
+  --project-type cli-tool # 搜索命令行工具
+  --min-lines 1000        # 最少1000行代码
+  --min-quality 7.0       # 质量评分7分以上
+
+质量/复杂度评分范围: 0.0 - 10.0`,
 		Run:   runMetadataSearch,
 	}
 	

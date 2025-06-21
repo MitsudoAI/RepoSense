@@ -179,6 +179,16 @@ func (ld *LanguageDetector) DetectLanguages(repoPath string, config *AnalysisCon
 		return nil, err
 	}
 	
+	ld.logger.Debugf("FindFiles 找到 %d 个文件", len(files))
+	if len(files) > 0 {
+		// 显示前几个文件用于调试
+		for i, file := range files {
+			if i < 5 {
+				ld.logger.Debugf("文件 %d: %s (扩展名: %s, 大小: %d)", i+1, file.Path, file.Extension, file.Size)
+			}
+		}
+	}
+	
 	// Count languages
 	languageStats := make(map[string]*LanguageInfo)
 	totalBytes := int64(0)

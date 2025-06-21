@@ -27,7 +27,7 @@ func GetFileExtension(filename string) string {
 	return ""
 }
 
-// IsTextFile checks if a file is likely a text file based on extension
+// IsTextFile checks if a file is likely a text file based on extension or filename
 func IsTextFile(filename string) bool {
 	textExtensions := map[string]bool{
 		"txt": true, "md": true, "rst": true, "json": true, "xml": true, "yaml": true, "yml": true,
@@ -37,10 +37,44 @@ func IsTextFile(filename string) bool {
 		"sql": true, "r": true, "m": true, "swift": true, "kt": true, "scala": true, "clj": true, "hs": true,
 		"ml": true, "fs": true, "elm": true, "dart": true, "vue": true, "svelte": true, "config": true, "conf": true,
 		"ini": true, "toml": true, "lock": true, "log": true, "csv": true, "tsv": true,
+		"mod": true, "sum": true, "cmake": true, "gradle": true, "properties": true, "gitignore": true, "dockerignore": true,
+		"editorconfig": true, "env": true, "example": true, "template": true, "sample": true,
+		// Web and markup
+		"handlebars": true, "hbs": true, "mustache": true, "twig": true, "jinja": true, "jinja2": true,
+		// Data formats  
+		"graphql": true, "gql": true, "proto": true, "avro": true, "thrift": true,
+		// Scripting and automation
+		"lua": true, "perl": true, "pl": true, "tcl": true, "awk": true, "sed": true,
+		// Functional programming
+		"lisp": true, "scm": true, "cljs": true, "erl": true, "ex": true, "exs": true,
+		// Systems programming
+		"asm": true, "s": true, "nasm": true,
+		// Other languages
+		"vb": true, "vbs": true, "pas": true, "pp": true, "ada": true, "adb": true, "ads": true,
+		"f": true, "f90": true, "f95": true, "f03": true, "f08": true, "for": true, "ftn": true,
+		"cob": true, "cobol": true, "cbl": true,
 	}
 	
+	// Check extension first
 	ext := GetFileExtension(filename)
-	return textExtensions[ext]
+	if textExtensions[ext] {
+		return true
+	}
+	
+	// Check special filenames without extensions
+	lowerFilename := strings.ToLower(filename)
+	specialTextFiles := map[string]bool{
+		"makefile": true, "dockerfile": true, "rakefile": true, "gemfile": true, "guardfile": true,
+		"podfile": true, "vagrantfile": true, "cmakelists.txt": true, "cmakelist.txt": true,
+		"readme": true, "license": true, "copying": true, "authors": true, "contributors": true,
+		"changelog": true, "changes": true, "news": true, "history": true, "install": true,
+		"todo": true, "bugs": true, "thanks": true, "acknowledgments": true,
+		"gitignore": true, "gitmodules": true, "gitattributes": true,
+		"dockerignore": true, "bashrc": true, "zshrc": true, "profile": true,
+		"vimrc": true, "tmux.conf": true, "screenrc": true,
+	}
+	
+	return specialTextFiles[lowerFilename] || specialTextFiles[strings.TrimPrefix(lowerFilename, ".")]
 }
 
 // ShouldIgnoreFile checks if a file should be ignored based on patterns
@@ -59,7 +93,7 @@ func ShouldIgnoreFile(filePath string, ignorePatterns []string) bool {
 	
 	// Default ignore patterns
 	filename := filepath.Base(filePath)
-	if strings.HasPrefix(filename, ".") && filename != ".gitignore" && filename != ".env" {
+	if strings.HasPrefix(filename, ".") && filename != ".gitignore" && filename != ".env" && filename != "." {
 		return true
 	}
 	
@@ -166,34 +200,41 @@ func FindFiles(rootPath string, extensions []string, ignorePatterns []string) ([
 			return nil
 		}
 		
-		// Skip ignored files
-		if ShouldIgnoreFile(relPath, ignorePatterns) {
-			if info.IsDir() {
+		// Only process files first
+		if info.IsDir() {
+			// Skip ignored directories
+			if ShouldIgnoreFile(relPath, ignorePatterns) {
 				return filepath.SkipDir
 			}
 			return nil
 		}
 		
-		// Only process files
-		if info.IsDir() {
+		// Skip ignored files
+		if ShouldIgnoreFile(relPath, ignorePatterns) {
 			return nil
 		}
 		
-		// Check extension
+		// Check extension and filter by text files for language detection
 		ext := GetFileExtension(info.Name())
-		if len(extMap) == 0 || extMap[ext] {
-			lines, _ := CountLines(path)
-			files = append(files, FileInfo{
-				Path:      relPath,
-				Extension: ext,
-				Size:      info.Size(),
-				Lines:     lines,
-			})
+		if len(extMap) == 0 {
+			// When no specific extensions requested, only include text files for language detection
+			if !IsTextFile(info.Name()) {
+				return nil
+			}
+		} else if !extMap[ext] {
+			return nil
 		}
+		
+		lines, _ := CountLines(path)
+		files = append(files, FileInfo{
+			Path:      relPath,
+			Extension: ext,
+			Size:      info.Size(),
+			Lines:     lines,
+		})
 		
 		return nil
 	})
-	
 	return files, err
 }
 
