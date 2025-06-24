@@ -126,31 +126,26 @@ func reportChangelogTable(report *ChangelogReport, verbose bool) {
 		return
 	}
 
-	// 表头
-	fmt.Printf("%-25s %-8s %-8s %-50s\n", "仓库名称", "提交数", "作者数", "主要更新")
-	fmt.Println(strings.Repeat("-", 100))
+	// 表头 - 不限制宽度
+	fmt.Printf("%-30s %-8s %-8s %s\n", "仓库名称", "提交数", "作者数", "主要更新")
+	fmt.Println(strings.Repeat("-", 120))
 
 	// 表格内容
 	for _, entry := range report.Entries {
 		name := entry.Repository.Name
-		if len(name) > 23 {
-			name = name[:20] + "..."
-		}
+		// 不截断仓库名称，但设置最小宽度
+		
+		// 生成详细的主要更新信息
+		detailedSummary := buildDetailedSummary(entry)
+		
+		// 第一行：基本信息，不截断主要更新内容
+		fmt.Printf("%-30s %-8d %-8d %s\n", 
+			name, entry.Stats.CommitCount, entry.Stats.AuthorCount, detailedSummary)
 
-		summary := entry.Summary.Title
-		if len(summary) > 48 {
-			summary = summary[:45] + "..."
-		}
-
-		fmt.Printf("%-25s %-8d %-8d %-50s\n", 
-			name, entry.Stats.CommitCount, entry.Stats.AuthorCount, summary)
-
-		// 详细模式下显示额外信息
-		if verbose {
-			if len(entry.Summary.Highlights) > 0 {
-				fmt.Printf("%-25s %-17s %s\n", "", "", 
-					strings.Join(entry.Summary.Highlights, " | "))
-			}
+		// 详细分类信息（多行显示）
+		categoryLines := buildCategoryLines(entry)
+		for _, line := range categoryLines {
+			fmt.Printf("%-47s %s\n", "", line)
 		}
 	}
 
@@ -308,5 +303,84 @@ func getCategoryDisplayNameWithEmoji(category string) string {
 		return "🔒 安全修复"
 	default:
 		return "📝 其他变更"
+	}
+}
+
+// buildDetailedSummary 构建详细的摘要信息的第一行
+func buildDetailedSummary(entry ChangelogEntry) string {
+	// 直接返回标题，它已经包含了主要信息
+	if entry.Summary.Title != "" {
+		return entry.Summary.Title
+	}
+	return fmt.Sprintf("%d个提交的更新", entry.Stats.CommitCount)
+}
+
+// buildCategoryLines 构建分类详情的多行显示
+func buildCategoryLines(entry ChangelogEntry) []string {
+	var lines []string
+	
+	// 按优先级顺序显示分类
+	categoryOrder := []string{"features", "fixes", "performance", "docs", "refactoring", "tests", "dependencies", "ci", "security", "other"}
+	
+	// 统计总的条目数，如果太多则只显示概要
+	totalItems := 0
+	for _, items := range entry.Summary.Categories {
+		totalItems += len(items)
+	}
+	
+	// 如果条目过多（>5个），只显示分类汇总
+	if totalItems > 5 {
+		var summaryParts []string
+		for _, category := range categoryOrder {
+			if items, exists := entry.Summary.Categories[category]; exists && len(items) > 0 {
+				categoryName := getCategoryName(category)
+				summaryParts = append(summaryParts, fmt.Sprintf("%s×%d", categoryName, len(items)))
+			}
+		}
+		if len(summaryParts) > 0 {
+			lines = append(lines, fmt.Sprintf("包含: %s", strings.Join(summaryParts, ", ")))
+		}
+	} else {
+		// 条目较少，显示详细内容
+		for _, category := range categoryOrder {
+			if items, exists := entry.Summary.Categories[category]; exists && len(items) > 0 {
+				categoryName := getCategoryName(category)
+				
+				// 显示每个分类的详细内容
+				for _, item := range items {
+					// 生成行内容，不限制长度
+					line := fmt.Sprintf("• %s: %s", categoryName, item)
+					lines = append(lines, line)
+				}
+			}
+		}
+	}
+	
+	return lines
+}
+
+// getCategoryName 获取简短的分类名称（不带emoji）
+func getCategoryName(category string) string {
+	switch category {
+	case "features":
+		return "新功能"
+	case "fixes":
+		return "修复"
+	case "docs":
+		return "文档"
+	case "refactoring":
+		return "重构"
+	case "tests":
+		return "测试"
+	case "performance":
+		return "性能"
+	case "dependencies":
+		return "依赖"
+	case "ci":
+		return "CI"
+	case "security":
+		return "安全"
+	default:
+		return "其他"
 	}
 }
