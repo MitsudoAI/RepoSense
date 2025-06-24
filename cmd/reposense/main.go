@@ -11,6 +11,7 @@ import (
 	"reposense/internal/config"
 	"reposense/pkg/analyzer"
 	"reposense/pkg/cache"
+	"reposense/pkg/changelog"
 	"reposense/pkg/llm"
 	"reposense/pkg/reporter"
 	"reposense/pkg/scanner"
@@ -272,8 +273,24 @@ func main() {
 	// Add sub-commands to metadata
 	metadataCmd.AddCommand(metadataShowCmd, metadataStatsCmd, metadataSearchCmd, metadataExportCmd)
 	
+	// Changelog command
+	var changelogCmd = &cobra.Command{
+		Use:   "changelog [directory]",
+		Short: "生成代码库变更日志",
+		Long:  "分析指定时间范围内的代码库更新，生成智能变更总结报告",
+		Args:  cobra.MaximumNArgs(1),
+		Run:   runChangelog,
+	}
+	
+	// Changelog command specific flags
+	changelogCmd.Flags().String("since", "", "开始时间 (格式: 2006-01-02 或 2006-01-02T15:04:05)")
+	changelogCmd.Flags().String("until", "", "结束时间 (格式: 2006-01-02 或 2006-01-02T15:04:05)")
+	changelogCmd.Flags().Int("days", 1, "分析最近N天的更新 (如果未指定since/until)")
+	changelogCmd.Flags().String("mode", "fast", "分析模式 (fast|deep|full)")
+	changelogCmd.Flags().String("language", "zh", "输出语言 (zh|en|ja)")
+
 	// Add commands
-	rootCmd.AddCommand(updateCmd, scanCmd, statusCmd, listCmd, analyzeCmd, metadataCmd, configCmd, cacheCmd)
+	rootCmd.AddCommand(updateCmd, scanCmd, statusCmd, listCmd, analyzeCmd, metadataCmd, configCmd, cacheCmd, changelogCmd)
 	
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
@@ -1237,6 +1254,180 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func runChangelog(cmd *cobra.Command, args []string) {
+	directory := getCurrentDirectory(args)
+	
+	if err := cfg.Validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "配置错误: %v\n", err)
+		os.Exit(1)
+	}
+	
+	// 解析时间范围参数
+	timeRange, err := parseTimeRange(cmd)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "时间范围解析错误: %v\n", err)
+		os.Exit(1)
+	}
+	
+	// 获取其他参数
+	mode, _ := cmd.Flags().GetString("mode")
+	language, _ := cmd.Flags().GetString("language")
+	
+	// 检查LLM配置
+	if cfg.EnableLLM && cfg.LLMAPIKey == "" {
+		if key := os.Getenv("OPENAI_API_KEY"); key != "" && cfg.LLMProvider == "openai" {
+			cfg.LLMAPIKey = key
+		} else if key := os.Getenv("GEMINI_API_KEY"); key != "" && cfg.LLMProvider == "gemini" {
+			cfg.LLMAPIKey = key
+		} else if key := os.Getenv("CLAUDE_API_KEY"); key != "" && cfg.LLMProvider == "claude" {
+			cfg.LLMAPIKey = key
+		} else if key := os.Getenv("LLM_API_KEY"); key != "" {
+			cfg.LLMAPIKey = key
+		}
+	}
+	
+	// 验证LLM配置
+	if cfg.EnableLLM {
+		if err := llm.ValidateConfiguration(llm.Provider(cfg.LLMProvider), cfg.LLMAPIKey, cfg.LLMBaseURL); err != nil {
+			fmt.Fprintf(os.Stderr, "LLM配置错误: %v\n", err)
+			fmt.Println("提示: 使用 --llm-api-key 设置API密钥，或设置环境变量")
+			os.Exit(1)
+		}
+	}
+	
+	// 构建分析选项
+	opts := changelog.ChangelogOptions{
+		Directory:       directory,
+		Mode:           changelog.AnalysisMode(mode),
+		TimeRange:      timeRange,
+		Language:       language,
+		EnableLLM:      cfg.EnableLLM,
+		LLMProvider:    cfg.LLMProvider,
+		LLMModel:       cfg.LLMModel,
+		LLMAPIKey:      cfg.LLMAPIKey,
+		LLMBaseURL:     cfg.LLMBaseURL,
+		LLMTimeout:     cfg.LLMTimeout,
+		IncludePatterns: cfg.IncludePatterns,
+		ExcludePatterns: cfg.ExcludePatterns,
+		OutputFormat:   cfg.OutputFormat,
+		SaveReport:     cfg.SaveReport,
+		ReportFile:     cfg.ReportFile,
+		WorkerCount:    cfg.WorkerCount,
+		Timeout:        cfg.Timeout,
+		Verbose:        cfg.Verbose,
+	}
+	
+	// 显示分析信息
+	fmt.Printf("🔍 正在扫描目录: %s\n", directory)
+	fmt.Printf("📅 时间范围: %s 至 %s\n", 
+		timeRange.Since.Format("2006-01-02"), timeRange.Until.Format("2006-01-02"))
+	fmt.Printf("⚙️  分析模式: %s\n", mode)
+	
+	if cfg.EnableLLM {
+		fmt.Printf("🤖 启用智能总结 (提供商: %s, 模型: %s, 语言: %s)\n", 
+			cfg.LLMProvider, cfg.LLMModel, language)
+	} else {
+		fmt.Printf("📋 使用规则引擎生成总结\n")
+	}
+	
+	// 创建分析器
+	analyzer := changelog.NewChangelogAnalyzer(opts)
+	
+	// 执行分析
+	fmt.Printf("🚀 开始分析，使用 %d 个工作协程\n", cfg.WorkerCount)
+	report, err := analyzer.Analyze(opts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "分析失败: %v\n", err)
+		os.Exit(1)
+	}
+	
+	// 显示结果
+	changelog.ReportChangelog(report, cfg.OutputFormat, cfg.Verbose)
+	
+	// 保存报告
+	if cfg.SaveReport {
+		filename := cfg.ReportFile
+		if filename == "" {
+			ext := "md"
+			if cfg.OutputFormat == reporter.FormatJSON {
+				ext = "json"
+			}
+			filename = fmt.Sprintf("reposense-changelog-%s.%s", time.Now().Format("20060102-150405"), ext)
+		}
+		
+		if err := changelog.SaveChangelogReport(report, filename, cfg.OutputFormat); err != nil {
+			fmt.Fprintf(os.Stderr, "保存报告失败: %v\n", err)
+		} else {
+			fmt.Printf("📄 报告已保存到: %s\n", filename)
+		}
+	}
+}
+
+func parseTimeRange(cmd *cobra.Command) (changelog.TimeRange, error) {
+	since, _ := cmd.Flags().GetString("since")
+	until, _ := cmd.Flags().GetString("until")
+	days, _ := cmd.Flags().GetInt("days")
+	
+	now := time.Now()
+	
+	// 如果指定了since或until，优先使用
+	if since != "" || until != "" {
+		var sinceTime, untilTime time.Time
+		var err error
+		
+		if since != "" {
+			sinceTime, err = parseTimeString(since)
+			if err != nil {
+				return changelog.TimeRange{}, fmt.Errorf("解析since时间失败: %w", err)
+			}
+		} else {
+			// 如果没有指定since，使用30天前作为默认值
+			sinceTime = now.AddDate(0, 0, -30)
+		}
+		
+		if until != "" {
+			untilTime, err = parseTimeString(until)
+			if err != nil {
+				return changelog.TimeRange{}, fmt.Errorf("解析until时间失败: %w", err)
+			}
+		} else {
+			// 如果没有指定until，使用当前时间
+			untilTime = now
+		}
+		
+		return changelog.TimeRange{Since: sinceTime, Until: untilTime}, nil
+	}
+	
+	// 使用days参数
+	if days <= 0 {
+		days = 1
+	}
+	
+	return changelog.TimeRange{
+		Since: now.AddDate(0, 0, -days),
+		Until: now,
+	}, nil
+}
+
+func parseTimeString(timeStr string) (time.Time, error) {
+	// 尝试多种时间格式
+	formats := []string{
+		"2006-01-02T15:04:05",
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04",
+		"2006-01-02 15:04",
+		"2006-01-02",
+	}
+	
+	for _, format := range formats {
+		if t, err := time.Parse(format, timeStr); err == nil {
+			return t, nil
+		}
+	}
+	
+	return time.Time{}, fmt.Errorf("无法解析时间格式: %s", timeStr)
 }
 
 func init() {
