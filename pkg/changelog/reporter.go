@@ -328,8 +328,8 @@ func buildCategoryLines(entry ChangelogEntry) []string {
 		totalItems += len(items)
 	}
 	
-	// 如果条目过多（>5个），只显示分类汇总
-	if totalItems > 5 {
+	// 如果条目过多（>10个），只显示分类汇总
+	if totalItems > 10 {
 		var summaryParts []string
 		for _, category := range categoryOrder {
 			if items, exists := entry.Summary.Categories[category]; exists && len(items) > 0 {
